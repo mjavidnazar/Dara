@@ -152,6 +152,7 @@ export function metricsAt(
     let peakCapital = 0;
     let totalGrossBuys = 0;
     let totalGrossSells = 0;
+    let totalBuyQty = 0;
 
     const list = transactions
       .filter((t) => t.assetId === asset.id && (!until || t.date <= until))
@@ -165,6 +166,7 @@ export function metricsAt(
         costBasis += total;
         runningCashFlow += total;
         totalGrossBuys += total;
+        totalBuyQty += q;
         if (runningCashFlow > peakCapital) {
           peakCapital = runningCashFlow;
         }
@@ -276,10 +278,26 @@ export function metricsAt(
     const isRiskFree = totalGrossSells >= totalGrossBuys && totalGrossBuys > 0;
     const netCashInvested = totalGrossBuys - totalGrossSells;
 
+    // میانگین خرید باید همیشه از روی تراکنش‌های خرید محاسبه شود.
+    // برای کپی‌ترید، displayQuantity همان «مانده دلاری فعلی» است (شامل سود/زیان)
+    // و نباید مخرج میانگین خرید باشد.
+    let averageCost: number;
+    if (mode === "copy") {
+      if (quantity > 0) {
+        // میانگین موزون خریدهای باقی‌مانده (بعد از کسر فروش/برداشت‌ها)
+        averageCost = Math.max(0, costBasis) / quantity;
+      } else {
+        // اگر همه‌ی سرمایه برداشت شده، میانگین کل خریدها
+        averageCost = totalBuyQty > 0 ? totalGrossBuys / totalBuyQty : 0;
+      }
+    } else {
+      averageCost = displayQuantity > 0 ? Math.max(0, costBasis) / displayQuantity : 0;
+    }
+
     return {
       asset,
       quantity: displayQuantity,
-      averageCost: displayQuantity > 0 ? Math.max(0, costBasis) / displayQuantity : 0,
+      averageCost,
       costBasis: Math.max(0, costBasis),
       marketValue: Math.max(0, marketValue),
       realizedProfit,
