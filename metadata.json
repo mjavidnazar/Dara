@@ -1,0 +1,6 @@
+{
+  "name": "دارا | مدیریت آفلاین پرتفوی",
+  "description": "ابزار فارسی و آفلاین مدیریت سرمایه‌گذاری و دارایی‌های شخصی",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
