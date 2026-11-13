@@ -42,6 +42,8 @@ import {
 } from "lucide-react";
 import { DonutChart, LineChart } from "./Charts";
 import { CapitalHealthPanel } from "./CapitalHealthPanel";
+import { ReportOverviewPanel } from "./ReportOverviewPanel";
+import { calculateReportOverview } from "../lib/reportOverview";
 import { InfoButton } from "./InfoGuide";
 import type { AuditTarget, CapitalReport } from "../lib/capitalReport";
 import { indexTransactionReviews } from "../lib/transactionReviews";
@@ -4577,9 +4579,14 @@ export function ReportsView({
     () => monthlyFlows.reduce((sum, item) => sum + item.dividends, 0),
     [monthlyFlows]
   );
+  const reportOverview = useMemo(
+    () => calculateReportOverview(metrics, capitalReport, totalValue, totalProfit),
+    [metrics, capitalReport, totalValue, totalProfit]
+  );
 
   return (
     <div className="view-container">
+      <ReportOverviewPanel overview={reportOverview} report={capitalReport} />
       <CapitalHealthPanel
         report={capitalReport}
         data={data}

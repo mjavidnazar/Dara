@@ -3119,6 +3119,31 @@ td { padding: 13px 10px; border-bottom: 1px solid #edf1ef; font-size: 10px; }
 .capital-technical > p { font-size: 11px; color: var(--muted); line-height: 1.9; }
 .reports-optional { margin-top: 0; }
 .reports-optional > :not(summary) { margin-top: 18px; }
+
+/* The seven requested portfolio measures stay visible even while audit details are collapsed. */
+.report-overview { border-color: var(--line); min-width: 0; }
+.report-overview-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.report-overview-head h2 { margin: 5px 0 4px; font-size: clamp(18px, 2.5vw, 23px); }
+.report-overview-head p { margin: 0; font-size: 11px; line-height: 1.8; color: var(--muted); }
+.report-overview-status { max-width: 100%; border-radius: 999px; padding: 7px 12px; font-size: 10px; font-weight: 700; line-height: 1.6; }
+.report-overview-status.ready { background: #e1f8ee; color: #076348; }
+.report-overview-status.review { background: #fff1d5; color: #875208; }
+.report-overview-caution { margin: 15px 0 0; padding: 10px 13px; border: 1px solid #f2d59c; border-radius: 9px; background: #fffbeb; color: #82521c; font-size: 11px; line-height: 1.9; }
+.report-overview-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; margin-top: 20px; }
+.report-overview-card { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 146px; padding: 15px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-soft); }
+.report-overview-card .card-label { font-size: 12px; font-weight: 700; line-height: 1.7; }
+.report-overview-value { display: block; margin-top: auto; font-size: clamp(17px, 2vw, 23px); line-height: 1.5; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.report-overview-card small { min-height: 30px; font-size: 10px; line-height: 1.7; color: var(--muted); }
+.report-overview-footnote { margin: 16px 0 0; padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; line-height: 1.9; }
+[data-theme="dark"] .report-overview-status.ready { background: #153d33; color: #a4f4d7; }
+[data-theme="dark"] .report-overview-status.review { background: #563d20; color: #fcd59b; }
+[data-theme="dark"] .report-overview-caution { background: #342d1d; border-color: #765a2c; color: #fcd59b; }
+@media (max-width: 1100px) { .report-overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px) {
+  .report-overview { padding: 16px; }
+  .report-overview-grid { grid-template-columns: minmax(0, 1fr); }
+  .report-overview-card { min-height: 0; }
+}
 [data-theme="dark"] .capital-review-type { color: #e3ae60; }
 @media (max-width: 640px) {
   .capital-step { padding: 12px; }
