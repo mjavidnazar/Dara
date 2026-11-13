@@ -13,6 +13,7 @@ import {
 import { JalaliDatePicker } from "./JalaliDatePicker";
 import {
   assetMode,
+  hasValidTradeAmounts,
   isDepositCertificate,
   money,
   nf,
@@ -21,8 +22,12 @@ import {
   todayIso,
   toEnglishDigits,
   toPersianDate,
+  transactionLabel,
   uid,
+  validIsoDate,
 } from "../lib/portfolio";
+import { linkedTransactions } from "../lib/transactionLinks";
+import { describeTransactionNote } from "../lib/transactionDescriptions";
 import type {
   Asset,
   Attachment,
@@ -30,6 +35,7 @@ import type {
   PriceHistory,
   StockDividend,
   StockOrder,
+  StockPrice,
   Transaction,
 } from "../lib/types";
 
@@ -163,6 +169,7 @@ export function KianBalanceModal({
             {signedMoney(num(value) - currentBalance)}
           </strong>
         </div>
+        <small style={{ color: "var(--negative)", lineHeight: 1.8 }}>اختلاف مانده به‌صورت «اصلاح نامشخص» ثبت می‌شود، نه سود یا آورده. برای نهایی شدن گزارش، علت اختلاف را از بخش گزارش‌ها بررسی کنید.</small>
         <div className="modal-actions">
           <button type="button" className="button secondary" onClick={onClose}>
             انصراف
@@ -217,6 +224,7 @@ export function HamiBalanceModal({
             {signedMoney(num(value) - currentBalance)}
           </strong>
         </div>
+        <small style={{ color: "var(--negative)", lineHeight: 1.8 }}>اختلاف مانده به‌صورت «اصلاح نامشخص» ثبت می‌شود، نه سود یا آورده. برای نهایی شدن گزارش، علت اختلاف را از بخش گزارش‌ها بررسی کنید.</small>
         <div className="modal-actions">
           <button type="button" className="button secondary" onClick={onClose}>
             انصراف
@@ -240,7 +248,9 @@ export function CopyBalanceModal({
   onClose: () => void;
 }) {
   const [balance, setBalance] = useState(String(asset.copyUsdBalance ?? 0));
-  const [rate, setRate] = useState(String(asset.copyUsdRate ?? asset.currentPrice ?? 90000));
+  // The user must enter a new rate to mark today's valuation as confirmed.
+  // Copying an old prefilled rate would silently hide a stale-price warning.
+  const [rate, setRate] = useState("");
 
   return (
     <Modal
@@ -252,6 +262,7 @@ export function CopyBalanceModal({
         className="modal-form"
         onSubmit={(e) => {
           e.preventDefault();
+          if (num(balance) < 0 || num(rate) <= 0) return;
           onSave(num(balance), num(rate));
           onClose();
         }}
@@ -274,7 +285,7 @@ export function CopyBalanceModal({
               inputMode="numeric"
               value={rate}
               onChange={(e) => setRate(e.target.value)}
-              placeholder="90000"
+              placeholder={`نرخ پیشین: ${money(asset.copyUsdRate ?? asset.currentPrice ?? 0)}`}
             />
           </label>
         </div>
@@ -366,6 +377,10 @@ export function AssetModal({
       currentPrice: price || 1,
       copyUsdBalance: mode === "copy" ? num(form.usdBalance) : undefined,
       copyUsdRate: mode === "copy" ? num(form.usdRate) : undefined,
+      lastValuationAt: mode === "copy"
+        ? (!initialAsset || num(form.usdRate) !== initialAsset.copyUsdRate
+          ? todayIso() : initialAsset.lastValuationAt)
+        : undefined,
       annualInterestRate: mode === "fixed" ? num(form.annualRate) : undefined,
       color: form.color || initialAsset?.color || assetColors[Math.floor(Math.random() * assetColors.length)],
       notes: form.notes.trim(),
@@ -599,36 +614,86 @@ export function TransactionModal({
   onSave: (tx: Transaction, attachments: Attachment[]) => void;
 }) {
   const initialAsset = editing?.assetId ?? defaultAssetId ?? data?.assets?.[0]?.id ?? "";
+  const initialCash = assetMode(data.assets.find((asset) => asset.id === initialAsset)) === "cash";
+  const existingPair = editing?.linkedTransactionId
+    ? data.transactions.find((item) => item.id === editing.linkedTransactionId)
+    : undefined;
+  const manualTransferAccount = editing?.kind === "transfer" && existingPair?.kind === "transfer"
+    ? existingPair.assetId : "";
+  const matchedPair = editing ? linkedTransactions(data, editing)[0] : undefined;
+  const unconfirmedMatch = Boolean(editing && matchedPair &&
+    (editing.linkedTransactionId !== matchedPair.id || matchedPair.linkedTransactionId !== editing.id));
+  const brokenLink = Boolean(editing && !matchedPair &&
+    (editing.linkedTransactionId || data.transactions.some((tx) => tx.linkedTransactionId === editing.id)));
+  const readableEditingNote = editing ? describeTransactionNote(data, editing) : "";
+  const hasTechnicalNote = Boolean(editing?.notes && readableEditingNote !== editing.notes);
   const [form, setForm] = useState({
     type: editing?.type ?? "buy",
     assetId: initialAsset,
-    quantity: String(editing?.quantity ?? ""),
+    quantity: String((initialCash ? editing?.totalPrice : editing?.quantity) ?? ""),
     unitPrice: String(editing?.unitPrice ?? ""),
     date: editing?.date ?? todayIso(),
     notes: editing?.notes ?? "",
-    destinationAssetId: editing?.destinationAssetId ?? "",
-    sourceAssetId: editing?.sourceAssetId ?? "",
+    // Never infer outside capital for a new purchase: it might be funded internally.
+    // An old account reference is evidence to review, not the owner's confirmation
+    // that the cash leg is an internal trade.
+    kind: editing?.kind ?? "",
+    stockDividendId: editing?.stockDividendId ?? "",
+    destinationAssetId: editing?.destinationAssetId ?? (editing?.type === "sell" ? manualTransferAccount : ""),
+    sourceAssetId: editing?.sourceAssetId ?? (editing?.type === "buy" ? manualTransferAccount : ""),
   });
 
   const [files, setFiles] = useState<File[]>([]);
   const selectedAsset = (data?.assets || []).find((asset) => asset.id === form.assetId);
   const mode = selectedAsset ? assetMode(selectedAsset) : "standard";
   const liquidAccounts = (data?.assets || []).filter(
-    (asset) =>
-      ["بانک", "حامی", "کیان", "دفتر گواهی"].some((name) => asset?.name?.includes(name)) &&
-      asset.id !== form.assetId
+    (asset) => assetMode(asset) === "cash" && asset.id !== form.assetId
   );
+  const canKeepManualPair = Boolean(editing?.kind === "transfer" && form.kind === "transfer" &&
+    editing.linkedTransactionId && existingPair?.kind === "transfer");
 
   const total =
-    mode === "stock" || mode === "fixed"
-      ? num(form.unitPrice)
-      : num(form.quantity) * num(form.unitPrice);
+    mode === "cash" ? num(form.quantity)
+    : mode === "stock" || mode === "fixed" ? num(form.unitPrice)
+    : num(form.quantity) * num(form.unitPrice);
+
+  // Explain the selected choice in everyday language without changing its
+  // stored `kind`: old transactions must never be classified by the UI itself.
+  const moneyKindHelp: Record<string, string> = {
+    opening_capital: "فقط اگر این پول برای شروع سرمایه‌گذاری از بیرونِ حساب‌ها و دارایی‌های ثبت‌شده در دارا آمده است؛ قدیمی بودن خرید به‌تنهایی کافی نیست.",
+    capital_in: "فقط اگر بعد از شروع، پول تازه‌ای از بیرونِ حساب‌ها و دارایی‌های ثبت‌شده در دارا وارد کرده‌اید؛ جابه‌جایی بین حساب‌ها نیست.",
+    capital_out: "فقط اگر پول واقعاً از سرمایه‌گذاری خارج شده است؛ اگر به حساب دیگر خودتان رفته، «جابه‌جایی بین حساب‌ها» را انتخاب کنید.",
+    interest: form.type === "sell"
+      ? "این ردیف قدیمی برداشت است ولی سود نام‌گذاری شده؛ جهت و دلیل آن را با سند بررسی کنید."
+      : "فقط سودی که واقعاً به همین حساب واریز شده است؛ وجه فروش دارایی یا سود مجمع سهام نیست.",
+    stock_dividend: "این مبلغ باید همان سود مجمعِ پرداخت‌شده‌ای باشد که قبلاً در بخش بورس ثبت کرده‌اید؛ آن را در فهرست بعدی انتخاب کنید.",
+    fee: form.type === "buy"
+      ? "این ردیف قدیمی واریز است ولی برگشت هزینه نام‌گذاری شده؛ دلیل آن را با سند بررسی کنید."
+      : "فقط هزینه یا کارمزدی که جداگانه از این حساب کم شده؛ کارمزدِ منظورشده در مبلغ معامله را دوباره ثبت نکنید.",
+    trade: mode === "cash"
+      ? "اگر این مبلغ بابت خرید یا فروش یک دارایی پرداخت یا دریافت شده است؛ اگر فقط بین دو حساب جابه‌جا شده، گزینهٔ جابه‌جایی را بزنید."
+      : "پولِ خرید از حسابی که در دارا ثبت کرده‌اید پرداخت شده یا پولِ فروش به آن برگشته؛ حساب واقعی را پایین انتخاب کنید.",
+    transfer: "پول فقط از یک حسابِ ثبت‌شده به حسابِ ثبت‌شدهٔ دیگر رفته است؛ حساب مقابل را پایین انتخاب کنید. این پول تازه یا سود نیست.",
+    balance_adjustment: "عدد موجودی را تغییر می‌دهد، اما علت پول نامعلوم می‌ماند و هشدارِ گزارش را برطرف نمی‌کند.",
+  };
+  const explanation = moneyKindHelp[form.kind];
+  const selectedMoneyKindHelp = typeof explanation === "string" ? explanation : (editing
+    ? "اگر هنوز مطمئن نیستید، ردیف قدیمی را فعلاً تغییر ندهید؛ برای پاک کردن هشدار، ماهیتش را حدس نزنید."
+    : "برای ردیف تازه باید منشأ یا مقصد واقعی پول را بدانید؛ اگر نامشخص است، فعلاً آن را ثبت نکنید.");
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     const quantity = mode === "stock" || mode === "fixed" ? 1 : num(form.quantity);
-    const unitPrice = num(form.unitPrice);
-    if (!quantity || !unitPrice) return;
+    const unitPrice = mode === "cash" ? 1 : num(form.unitPrice);
+    // Do not erase an old account reference just because an unclassified row's
+    // notes were saved without confirming what the cash movement represented.
+    if (quantity <= 0 || unitPrice <= 0 || !form.assetId || !form.date ||
+        ((!editing || editing.linkedTransactionId || editing.sourceAssetId || editing.destinationAssetId) && !form.kind)) return;
+    const cashAccount = (form.type === "buy" ? form.sourceAssetId : form.destinationAssetId);
+    if ((form.kind === "trade" || form.kind === "transfer") &&
+        (cashAccount ? !liquidAccounts.some((account) => account.id === cashAccount) : !canKeepManualPair)) return;
+    if (form.kind === "stock_dividend" && (mode !== "cash" || form.type !== "buy" ||
+      !data.stockDividends.some((dividend) => dividend.id === form.stockDividendId && dividend.status === "paid"))) return;
 
     const id = editing?.id ?? uid("tx");
     try {
@@ -657,9 +722,15 @@ export function TransactionModal({
           totalPrice: total,
           date: form.date,
           notes: form.notes,
-          sourceAssetId: form.type === "buy" ? form.sourceAssetId || undefined : undefined,
+          kind: (form.kind || undefined) as Transaction["kind"],
+          stockDividendId: form.kind === "stock_dividend" ? form.stockDividendId : undefined,
+          sourceAssetId:
+            form.type === "buy" && (form.kind === "trade" || form.kind === "transfer")
+              ? form.sourceAssetId || undefined : undefined,
           destinationAssetId:
-            form.type === "sell" ? form.destinationAssetId || undefined : undefined,
+            form.type === "sell" && (form.kind === "trade" || form.kind === "transfer")
+              ? form.destinationAssetId || undefined : undefined,
+          linkedTransactionId: editing?.linkedTransactionId,
           attachmentIds: attachments.map((file) => file.id),
           createdAt: editing?.createdAt ?? new Date().toISOString(),
         },
@@ -683,14 +754,14 @@ export function TransactionModal({
           <button
             type="button"
             className={form.type === "buy" ? "buy active" : ""}
-            onClick={() => setForm({ ...form, type: "buy" })}
+            onClick={() => setForm({ ...form, type: "buy", kind: "", destinationAssetId: "", stockDividendId: "" })}
           >
             <ArrowDownLeft /> خرید / واریز
           </button>
           <button
             type="button"
             className={form.type === "sell" ? "sell active" : ""}
-            onClick={() => setForm({ ...form, type: "sell" })}
+            onClick={() => setForm({ ...form, type: "sell", kind: "", sourceAssetId: "", stockDividendId: "" })}
           >
             <ArrowUpLeft /> فروش / برداشت
           </button>
@@ -719,7 +790,7 @@ export function TransactionModal({
           </label>
           {mode !== "stock" && mode !== "fixed" && (
             <label>
-              <span>تعداد {selectedAsset?.unit ? `(${selectedAsset.unit})` : ""} *</span>
+              <span>{mode === "cash" ? "مبلغ واریز/برداشت (تومان) *" : `تعداد ${selectedAsset?.unit ? `(${selectedAsset.unit})` : ""} *`}</span>
               <input
                 required
                 inputMode="decimal"
@@ -729,39 +800,113 @@ export function TransactionModal({
               />
             </label>
           )}
-          <label>
-            <span>
-              {mode === "stock" || mode === "fixed" ? "مبلغ کل (تومان)" : "قیمت واحد (تومان)"} *
-            </span>
-            <input
-              required
-              inputMode="numeric"
-              value={form.unitPrice}
-              onChange={(e) => setForm({ ...form, unitPrice: e.target.value })}
-              placeholder="0"
-            />
-          </label>
+          {mode !== "cash" && (
+            <label>
+              <span>
+                {mode === "stock" || mode === "fixed" ? "مبلغ کل (تومان)" : "قیمت واحد (تومان)"} *
+              </span>
+              <input
+                required
+                inputMode="numeric"
+                value={form.unitPrice}
+                onChange={(e) => setForm({ ...form, unitPrice: e.target.value })}
+                placeholder="0"
+              />
+            </label>
+          )}
         </div>
 
-        {liquidAccounts.length > 0 && (
+        <label>
+          <span>{form.type === "buy" ? "پول این خرید / واریز از کجا آمده؟ *" : "پول این فروش / برداشت به کجا رفته؟ *"}</span>
+          <select
+            aria-describedby="transaction-money-kind-help"
+            required={!editing || Boolean(editing.linkedTransactionId || editing.sourceAssetId || editing.destinationAssetId)}
+            value={form.kind}
+            onChange={(e) => setForm({
+              ...form,
+              kind: e.target.value,
+              sourceAssetId: "",
+              destinationAssetId: "",
+              stockDividendId: e.target.value === "stock_dividend" ? form.stockDividendId : "",
+            })}
+          >
+            <option value="">{editing ? "هنوز نمی‌دانم؛ بعداً بررسی می‌کنم" : "یکی از گزینه‌های زیر را انتخاب کنید"}</option>
+            {form.type === "buy" ? (
+              <>
+                <option value="opening_capital">پولِ شروع سرمایه‌گذاری (از بیرون)</option>
+                <option value="capital_in">پول تازهٔ بعدی (از بیرون)</option>
+                {mode === "cash" && <option value="interest">سودِ همین حساب واریز شده</option>}
+                {mode === "cash" && <option value="stock_dividend">سود مجمع سهام واریز شده</option>}
+              </>
+            ) : (
+              <>
+                <option value="capital_out">پول را از سرمایه‌گذاری بیرون بردم</option>
+                {mode === "cash" && <option value="fee">کارمزد یا هزینهٔ جداگانه پرداختم</option>}
+              </>
+            )}
+            <option value="trade">{mode === "cash" ? "پرداخت / دریافت بابت خرید یا فروش دارایی" : "خرید / فروش با پولِ حساب ثبت‌شدهٔ خودم"}</option>
+            <option value="transfer">پول را بین حساب‌های خودم جابه‌جا کردم</option>
+            {editing && <option value="balance_adjustment">فقط موجودی را اصلاح کردم؛ علتش معلوم نیست</option>}
+            {editing?.kind === "interest" && form.type === "sell" && <option value="interest">سودِ قدیمی؛ جهت این ردیف را بررسی کنید</option>}
+            {editing?.kind === "fee" && form.type === "buy" && <option value="fee">برگشت هزینهٔ قبلی؛ با سند بررسی کنید</option>}
+          </select>
+          <small id="transaction-money-kind-help" aria-live="polite" style={{ color: "var(--muted)", lineHeight: 1.8 }}>
+            {selectedMoneyKindHelp}
+          </small>
+        </label>
+
+        {form.kind === "stock_dividend" && (
           <label>
-            <span>{form.type === "buy" ? "مبدأ وجه (اختیاری)" : "مقصد وجه (اختیاری)"}</span>
-            <select
-              value={form.type === "buy" ? form.sourceAssetId : form.destinationAssetId}
-              onChange={(e) =>
-                form.type === "buy"
-                  ? setForm({ ...form, sourceAssetId: e.target.value })
-                  : setForm({ ...form, destinationAssetId: e.target.value })
-              }
-            >
-              <option value="">بدون انتخاب حساب رابط</option>
-              {liquidAccounts.map((asset) => (
-                <option key={asset.id} value={asset.id}>
-                  {asset.name}
+            <span>سود مجمع متناظر *</span>
+            <select required value={form.stockDividendId} onChange={(event) => {
+              const dividend = data.stockDividends.find((item) => item.id === event.target.value);
+              setForm({ ...form, stockDividendId: event.target.value,
+                ...(!editing && dividend ? { quantity: String(dividend.amount), unitPrice: "1" } : {}) });
+            }}>
+              <option value="">سود مجمع ثبت‌شده در بخش بورس را انتخاب کنید</option>
+              {data.stockDividends.filter((dividend) => dividend.status === "paid").map((dividend) => (
+                <option key={dividend.id} value={dividend.id}>
+                  {dividend.symbol} · {toPersianDate(dividend.date)} · {money(dividend.amount)}
                 </option>
               ))}
             </select>
+            <small style={{ color: "var(--muted)", lineHeight: 1.8 }}>
+              مبلغ و تاریخ این واریز باید با سود مجمع بخواند. سود دوباره به عملکرد حساب نقدی اضافه نمی‌شود.
+            </small>
           </label>
+        )}
+
+        {(form.kind === "trade" || form.kind === "transfer") && liquidAccounts.length > 0 && (
+          <label>
+            <span>{form.type === "buy" ? "پول از کدام حسابِ ثبت‌شده پرداخت شد؟" : "پول به کدام حسابِ ثبت‌شده واریز شد؟"} *</span>
+            <select
+              required={!canKeepManualPair}
+              value={form.type === "buy" ? form.sourceAssetId : form.destinationAssetId}
+              onChange={(e) => form.type === "buy"
+                ? setForm({ ...form, sourceAssetId: e.target.value })
+                : setForm({ ...form, destinationAssetId: e.target.value })}
+            >
+              <option value="">{canKeepManualPair ? "حسابِ قبلاً پیوندخورده (بدون تغییر)" : "حساب واقعی را انتخاب کنید"}</option>
+              {liquidAccounts.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}
+            </select>
+          </label>
+        )}
+        {(form.kind === "trade" || form.kind === "transfer") && liquidAccounts.length === 0 && !canKeepManualPair && (
+          <p className="negative-text">ابتدا یک حساب نقدی در بخش دارایی‌ها تعریف کنید، سپس معامله را به آن متصل کنید.</p>
+        )}
+        {brokenLink ? (
+          <p className="negative-text">
+            ردیفِ وصل‌شده با تاریخ یا مبلغ این ردیف نمی‌خواند. برای جلوگیری از دست‌کاری پول اشتباه، با ذخیرهٔ این فرم ردیف دیگر تغییر نمی‌کند و واریز تازه‌ای هم ساخته نمی‌شود. هر دو ردیف را با صورت‌حساب بررسی کنید.
+          </p>
+        ) : editing?.linkedTransactionId && !unconfirmedMatch && (
+          <small style={{ color: "var(--muted)" }}>
+            این ردیف به ردیف دیگری وصل است: اگر تاریخ یا مبلغ را تغییر دهید، ردیف دیگر هم تغییر می‌کند؛ اگر آن را «پول از بیرون» یا «برداشت به بیرون» کنید، ردیف وصل‌شده حذف می‌شود. اول از اطلاعات خود پشتیبان بگیرید.
+          </small>
+        )}
+        {unconfirmedMatch && (
+          <small style={{ color: "var(--muted)", lineHeight: 1.8 }}>
+            در حسابی دیگر، مبلغی برابر در همین روز دیده می‌شود، اما معلوم نیست همان پول باشد. بدون انتخاب حساب مرتبط، تغییر این ردیف، آن ردیف را خودکار حذف یا اصلاح نمی‌کند؛ هر دو را با صورت‌حساب بررسی کنید.
+          </small>
         )}
 
         <div className="total-preview">
@@ -769,14 +914,31 @@ export function TransactionModal({
           <strong>{money(total)}</strong>
         </div>
 
-        <label>
-          <span>توضیحات معامله</span>
-          <textarea
-            value={form.notes}
-            onChange={(e) => setForm({ ...form, notes: e.target.value })}
-            placeholder="علت خرید یا فروش، شماره فاکتور، توضیحات کارگزاری…"
-          />
-        </label>
+        {hasTechnicalNote && (
+          <div className="transaction-description-preview">
+            <b>شرح معاملهٔ مرتبط</b>
+            <p>{readableEditingNote}</p>
+            <small>این شرح از ردیف‌های ثبت‌شده ساخته شده، نه از تأیید صورت‌حساب. شناسهٔ فنی در یادداشت اصلی محفوظ است تا ارتباط ردیف‌ها از بین نرود.</small>
+          </div>
+        )}
+        {hasTechnicalNote ? (
+          <details className="transaction-technical-note">
+            <summary>نمایش / ویرایش یادداشت فنیِ اصلی</summary>
+            <label>
+              <span>متن ذخیره‌شده؛ تغییر شناسه ممکن است ارتباط معامله‌ها را قطع کند</span>
+              <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+            </label>
+          </details>
+        ) : (
+          <label>
+            <span>توضیحات معامله</span>
+            <textarea
+              value={form.notes}
+              onChange={(e) => setForm({ ...form, notes: e.target.value })}
+              placeholder="علت خرید یا فروش، شماره فاکتور، توضیحات کارگزاری…"
+            />
+          </label>
+        )}
 
         <label className="file-drop">
           <Paperclip />
@@ -817,23 +979,35 @@ export function TransactionModal({
 export function PriceModalBulk({
   assets,
   history,
+  focusAssetId,
+  focusHistoryId,
   onClose,
   onSave,
   onEditHistory,
 }: {
   assets: Asset[];
   history: PriceHistory[];
+  focusAssetId?: string;
+  focusHistoryId?: string;
   onClose: () => void;
   onSave: (updates: Array<{ assetId: string; price: number }>, date: string) => void;
   onEditHistory: (id: string, price: number, date: string) => void;
 }) {
-  const [prices, setPrices] = useState<Record<string, string>>(() =>
-    Object.fromEntries(assets.map((asset) => [asset.id, String(asset.currentPrice || "")]))
-  );
+  // Empty fields mean "leave unchanged"; updating one asset must not stamp all old
+  // prices as today's prices or force a fake price for the Bourse/cash ledger.
+  const priceableAssets = assets.filter((asset) => !["cash", "stock", "copy"].includes(assetMode(asset)))
+    .sort((a, b) => Number(b.id === focusAssetId) - Number(a.id === focusAssetId));
+  const [prices, setPrices] = useState<Record<string, string>>({});
   const [date, setDate] = useState(todayIso());
-  const [editing, setEditing] = useState<{ id: string; price: string; date: string } | null>(null);
+  const [editing, setEditing] = useState<{ id: string; price: string; date: string } | null>(() => {
+    const record = history.find((item) => item.id === focusHistoryId);
+    return record ? { id: record.id, price: String(record.price), date: record.date } : null;
+  });
+  const [showAllHistory, setShowAllHistory] = useState(false);
 
-  const recent = [...history].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 20);
+  const sortedHistory = [...history].sort((a, b) =>
+    Number(b.id === focusHistoryId) - Number(a.id === focusHistoryId) || (b.date || "").localeCompare(a.date || ""));
+  const recent = showAllHistory ? sortedHistory : sortedHistory.slice(0, 20);
 
   return (
     <Modal
@@ -846,7 +1020,9 @@ export function PriceModalBulk({
         className="modal-form"
         onSubmit={(e) => {
           e.preventDefault();
-          const updates = assets
+          if (!validIsoDate(date) || date > todayIso()) return;
+          const updates = priceableAssets
+            .filter((asset) => String(prices[asset.id] || "").trim() !== "")
             .map((asset) => ({ assetId: asset.id, price: num(prices[asset.id]) }))
             .filter((item) => item.price > 0);
           if (updates.length) {
@@ -859,19 +1035,20 @@ export function PriceModalBulk({
           <span>تاریخ قیمت‌های جدید</span>
           <JalaliDatePicker value={date} onChange={setDate} />
         </label>
+        {!validIsoDate(date) || date > todayIso() ? <small className="negative-text">برای ارزش‌گذاری امروز، تاریخ نرخ باید معتبر و حداکثر امروز باشد.</small> : null}
         <div className="bulk-price-list">
-          {assets.map((asset) => (
-            <label className="bulk-price-row" key={asset.id}>
+          {priceableAssets.map((asset) => (
+            <label className={`bulk-price-row ${focusAssetId === asset.id ? "focused" : ""}`} key={asset.id}>
               <span>
                 <b>{asset.name}</b>
                 <small>قیمت فعلی: {money(asset.currentPrice)}</small>
               </span>
               <input
+                autoFocus={focusAssetId === asset.id}
                 inputMode="numeric"
-                required
                 value={prices[asset.id] ?? ""}
                 onChange={(e) => setPrices({ ...prices, [asset.id]: e.target.value })}
-                placeholder="قیمت روز (تومان)"
+                placeholder="قیمت جدید (خالی = بدون تغییر)"
               />
             </label>
           ))}
@@ -880,7 +1057,7 @@ export function PriceModalBulk({
           <button type="button" className="button secondary" onClick={onClose}>
             انصراف
           </button>
-          <button type="submit" className="button primary">
+          <button type="submit" className="button primary" disabled={!validIsoDate(date) || date > todayIso() || !priceableAssets.some((asset) => num(prices[asset.id]) > 0)}>
             ثبت قیمت‌های جدید
           </button>
         </div>
@@ -889,7 +1066,7 @@ export function PriceModalBulk({
       {recent.length > 0 && (
         <div className="price-history" style={{ padding: "0 22px 22px" }}>
           <h3 style={{ margin: "16px 0 10px", fontSize: "14px" }}>آخرین قیمت‌های ثبت‌شده در تاریخچه</h3>
-          <div style={{ display: "grid", gap: "8px", maxHeight: "200px", overflowY: "auto" }}>
+          <div style={{ display: "grid", gap: "8px", maxHeight: editing ? undefined : "200px", overflowY: editing ? "visible" : "auto" }}>
             {recent.map((item) => {
               const asset = assets.find((a) => a.id === item.assetId);
               const isEditing = editing?.id === item.id;
@@ -908,7 +1085,8 @@ export function PriceModalBulk({
                 >
                   <b>{asset?.name ?? "دارایی"}</b>
                   {isEditing ? (
-                    <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                    <div style={{ display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" }}>
+                      <JalaliDatePicker value={editing.date} onChange={(nextDate) => setEditing({ ...editing, date: nextDate })} />
                       <input
                         value={editing.price}
                         inputMode="numeric"
@@ -919,13 +1097,16 @@ export function PriceModalBulk({
                         type="button"
                         className="button primary"
                         style={{ minHeight: "32px", padding: "0 10px" }}
+                        disabled={num(editing.price) <= 0 || !validIsoDate(editing.date) || editing.date > todayIso()}
                         onClick={() => {
+                          if (num(editing.price) <= 0 || !validIsoDate(editing.date) || editing.date > todayIso()) return;
                           onEditHistory(item.id, num(editing.price), editing.date);
                           setEditing(null);
                         }}
                       >
                         ذخیره
                       </button>
+                      {(!validIsoDate(editing.date) || editing.date > todayIso()) && <small className="negative-text">تاریخ صحیح را انتخاب کنید.</small>}
                     </div>
                   ) : (
                     <div style={{ display: "flex", gap: "14px", alignItems: "center" }}>
@@ -946,8 +1127,82 @@ export function PriceModalBulk({
               );
             })}
           </div>
+          {history.length > 20 && (
+            <button type="button" className="button ghost small-btn" style={{ marginTop: "10px" }} onClick={() => setShowAllHistory((previous) => !previous)}>
+              {showAllHistory ? "نمایش کمتر" : `نمایش همهٔ ${nf.format(history.length)} قیمت ثبت‌شده`}
+            </button>
+          )}
         </div>
       )}
+    </Modal>
+  );
+}
+
+export function StockPriceHistoryModal({
+  history,
+  focusId,
+  onClose,
+  onSave,
+  onDelete,
+}: {
+  history: StockPrice[];
+  focusId?: string;
+  onClose: () => void;
+  onSave: (price: StockPrice) => void;
+  onDelete: (price: StockPrice) => void;
+}) {
+  const [editing, setEditing] = useState<{ id: string; symbol: string; date: string; price: string } | null>(() => {
+    const record = history.find((item) => item.id === focusId);
+    return record ? { id: record.id, symbol: String(record.symbol ?? ""), date: String(record.date ?? ""), price: String(record.price ?? "") } : null;
+  });
+  const [showAll, setShowAll] = useState(false);
+  const ordered = [...history].sort((a, b) =>
+    Number(b.id === focusId) - Number(a.id === focusId) || String(b.date ?? "").localeCompare(String(a.date ?? "")));
+  const recent = showAll ? ordered : ordered.slice(0, 20);
+  const canSave = Boolean(editing && editing.symbol.trim() && num(editing.price) > 0 &&
+    validIsoDate(editing.date) && editing.date <= todayIso());
+
+  return (
+    <Modal title="تاریخچهٔ قیمت سهام" subtitle="هر نرخ پایانی را با تاریخ و نماد واقعی آن تطبیق دهید؛ اصلاح رکورد، دادهٔ دیگری را تغییر نمی‌دهد." onClose={onClose} wide>
+      {editing && (
+        <form className="modal-form" onSubmit={(event) => {
+          event.preventDefault();
+          if (!canSave) return;
+          const record = history.find((item) => item.id === editing.id);
+          if (!record) return;
+          onSave({ ...record, symbol: editing.symbol.trim(), date: editing.date, price: num(editing.price) });
+          setEditing(null);
+        }}>
+          <b>اصلاح رکورد قیمت سهام</b>
+          <div className="form-grid">
+            <label><span>نماد *</span><input required value={editing.symbol} onChange={(event) => setEditing({ ...editing, symbol: event.target.value })} /></label>
+            <label><span>تاریخ نرخ *</span><JalaliDatePicker value={editing.date} onChange={(date) => setEditing({ ...editing, date })} /></label>
+            <label><span>قیمت پایانی (تومان) *</span><input required inputMode="decimal" value={editing.price} onChange={(event) => setEditing({ ...editing, price: event.target.value })} /></label>
+          </div>
+          {!validIsoDate(editing.date) || editing.date > todayIso() ? <small className="negative-text">تاریخ نرخ باید معتبر باشد و از امروز جلوتر نباشد.</small> : null}
+          <div className="modal-actions">
+            <button type="button" className="button secondary" onClick={() => setEditing(null)}>انصراف</button>
+            <button type="submit" className="button primary" disabled={!canSave}>ذخیرهٔ اصلاح قیمت</button>
+            <button type="button" className="button ghost" onClick={() => {
+              const record = history.find((item) => item.id === editing.id);
+              if (record) onDelete(record);
+            }}>حذف با تأیید</button>
+          </div>
+        </form>
+      )}
+      <div className="price-history" style={{ padding: "0 22px 22px" }}>
+        <h3 style={{ fontSize: "14px" }}>رکوردهای ثبت‌شده ({nf.format(history.length)})</h3>
+        {recent.length ? <div className="table-wrapper"><table className="data-table">
+          <thead><tr><th>نماد</th><th>تاریخ</th><th>قیمت پایانی</th><th>عملیات</th></tr></thead>
+          <tbody>{recent.map((item) => <tr key={item.id}>
+            <td>{item.symbol || "نماد نامشخص"}</td>
+            <td>{toPersianDate(item.date)}</td>
+            <td>{money(item.price)}</td>
+            <td><button type="button" className="button ghost small-btn" onClick={() => setEditing({ id: item.id, symbol: String(item.symbol ?? ""), date: String(item.date ?? ""), price: String(item.price ?? "") })}>ویرایش</button></td>
+          </tr>)}</tbody>
+        </table></div> : <p>هنوز قیمتی ثبت نشده است؛ از فرم به‌روزرسانی نرخ‌ها در بخش بورس استفاده کنید.</p>}
+        {history.length > 20 && <button type="button" className="button ghost small-btn" style={{ marginTop: "10px" }} onClick={() => setShowAll((previous) => !previous)}>{showAll ? "نمایش کمتر" : `نمایش همهٔ ${nf.format(history.length)} نرخ`}</button>}
+      </div>
     </Modal>
   );
 }
@@ -957,11 +1212,13 @@ export function StockOrderModal({
   onClose,
   onSave,
   existingSymbols = [],
+  cashAccounts = [],
 }: {
   order?: StockOrder | null;
   onClose: () => void;
   onSave: (order: StockOrder) => void;
   existingSymbols?: string[];
+  cashAccounts?: Asset[];
 }) {
   const isNew = !order;
   const [form, setForm] = useState({
@@ -973,7 +1230,7 @@ export function StockOrderModal({
     date: order?.date ?? todayIso(),
     notes: order?.notes ?? "",
     commission: String(order?.commission ?? 0),
-    sourceAssetId: order?.sourceAssetId ?? "asset-hami",
+    sourceAssetId: order?.sourceAssetId ?? (cashAccounts.find((asset) => asset.id === "asset-hami") || cashAccounts[0])?.id ?? "",
   });
 
   const handleQtyOrRateChange = (qtyStr: string, rateStr: string, commStr: string, type: "buy" | "sell") => {
@@ -1003,10 +1260,11 @@ export function StockOrderModal({
     const quantity = num(form.quantity);
     const totalPrice = num(form.totalPrice) || Math.round(quantity * num(form.unitPrice));
     const symbol = form.symbol.trim();
-    if (!quantity || !totalPrice || !symbol) return;
+    if (quantity <= 0 || totalPrice <= 0 || !symbol || !cashAccounts.some((asset) => asset.id === form.sourceAssetId)) return;
 
     const unitPriceVal = num(form.unitPrice) || Math.round(totalPrice / quantity);
     const commVal = num(form.commission);
+    if (commVal < 0) return;
     const action = form.type === "buy" ? "خرید" : "فروش";
     const line1 = `${action} ${nf.format(quantity)} سهم ${symbol} در قیمت ${money(unitPriceVal)}`;
     const line2 = `هزینه‌ها ${money(commVal)}`;
@@ -1022,7 +1280,7 @@ export function StockOrderModal({
       date: form.date,
       notes: form.notes || defaultNote,
       commission: commVal,
-      sourceAssetId: form.sourceAssetId || "asset-hami",
+      sourceAssetId: form.sourceAssetId,
       sourceKey: order?.sourceKey || `${form.date}|${form.type}|${symbol}|${quantity}|${form.unitPrice}|${totalPrice}`,
       time: order?.time || "00:00:00",
     });
@@ -1034,7 +1292,7 @@ export function StockOrderModal({
   return (
     <Modal
       title={isNew ? "ثبت معامله جدید بورس" : `ویرایش معامله ${order?.symbol || "بورس"}`}
-      subtitle="تسویه نقدینگی این معامله به‌صورت خودکار در صندوق حامی ثبت و هم‌گام می‌شود."
+      subtitle="برداشت/واریز متناظر این معامله در حساب تسویهٔ انتخاب‌شده ثبت و هم‌گام می‌شود."
       onClose={onClose}
     >
       <form className="modal-form" onSubmit={save}>
@@ -1066,8 +1324,8 @@ export function StockOrderModal({
                 handleQtyOrRateChange(form.quantity, form.unitPrice, form.commission, nextType);
               }}
             >
-              <option value="buy">خرید سهام (برداشت از حامی)</option>
-              <option value="sell">فروش سهام (واریز به حامی)</option>
+              <option value="buy">خرید سهام (برداشت از حساب تسویه)</option>
+              <option value="sell">فروش سهام (واریز به حساب تسویه)</option>
             </select>
           </label>
         </div>
@@ -1124,7 +1382,7 @@ export function StockOrderModal({
 
         {num(form.totalPrice) > 0 && (
           <div className="total-preview">
-            <span>مبلغ تسویه نقدی با کارگزاری (حامی):</span>
+            <span>مبلغ تسویه نقدی در حساب انتخاب‌شده:</span>
             <strong>{money(num(form.totalPrice))}</strong>
           </div>
         )}
@@ -1132,6 +1390,14 @@ export function StockOrderModal({
         <label>
           <span>تاریخ معامله</span>
           <JalaliDatePicker value={form.date} onChange={(date) => setForm({ ...form, date })} />
+        </label>
+        <label>
+          <span>حساب تسویهٔ معامله *</span>
+          <select required value={form.sourceAssetId} onChange={(event) => setForm({ ...form, sourceAssetId: event.target.value })}>
+            <option value="">حساب نقدی را انتخاب کنید</option>
+            {cashAccounts.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}
+          </select>
+          {!cashAccounts.length && <small className="negative-text">برای ثبت معاملهٔ بورس، ابتدا یک حساب نقدی در بخش دارایی‌ها تعریف کنید.</small>}
         </label>
         <label>
           <span>توضیحات و یادداشت</span>
@@ -1157,11 +1423,13 @@ export function StockOrderModal({
 export function StockSymbolTradesModal({
   symbol,
   orders,
+  cashAccounts,
   onClose,
   onEditOrder,
 }: {
   symbol: string;
   orders: StockOrder[];
+  cashAccounts: Asset[];
   onClose: () => void;
   onEditOrder: (order: StockOrder) => void;
 }) {
@@ -1219,6 +1487,7 @@ export function StockSymbolTradesModal({
       {editingOrder && (
         <StockOrderModal
           order={editingOrder}
+          cashAccounts={cashAccounts}
           onClose={() => setEditingOrder(null)}
           onSave={(updated) => {
             onEditOrder(updated);
@@ -1239,6 +1508,7 @@ export function StockDividendModal({
   onSave,
   onToggleStatus,
   onDelete,
+  onShowTransactions,
 }: {
   symbol?: string | null;
   symbols?: string[];
@@ -1248,6 +1518,7 @@ export function StockDividendModal({
   onSave: (dividend: StockDividend) => void;
   onToggleStatus: (dividend: StockDividend, targetStatus?: "pending" | "paid") => void;
   onDelete?: (id: string) => void;
+  onShowTransactions?: () => void;
 }) {
   const [selectedSymbol, setSelectedSymbol] = useState(
     initialDividend?.symbol || symbol || (symbols[0] ?? "")
@@ -1257,6 +1528,7 @@ export function StockDividendModal({
   );
   const [date, setDate] = useState(initialDividend?.date || todayIso());
   const [status, setStatus] = useState<"pending" | "paid">(initialDividend?.status || "pending");
+  const [receivedOutside, setReceivedOutside] = useState(Boolean(initialDividend?.receivedOutside));
   const [notes, setNotes] = useState(initialDividend?.notes || "");
   const [editingId, setEditingId] = useState<string | null>(initialDividend?.id || null);
 
@@ -1271,6 +1543,7 @@ export function StockDividendModal({
     setAmount(item.amount ? Number(item.amount).toLocaleString("en-US") : "");
     setDate(item.date);
     setStatus(item.status);
+    setReceivedOutside(Boolean(item.receivedOutside));
     setNotes(item.notes || "");
   };
 
@@ -1279,6 +1552,7 @@ export function StockDividendModal({
     setAmount("");
     setDate(todayIso());
     setStatus("pending");
+    setReceivedOutside(false);
     setNotes("");
   };
 
@@ -1300,6 +1574,7 @@ export function StockDividendModal({
               amount: parsed,
               date,
               status,
+              receivedOutside: status === "paid" && receivedOutside ? true : undefined,
               notes: notes.trim() || undefined,
             });
             handleCancelEdit();
@@ -1380,9 +1655,18 @@ export function StockDividendModal({
           </div>
           <p style={{ margin: "6px 0 0", fontSize: "11.5px", color: "var(--muted)", lineHeight: 1.6 }}>
             {status === "paid"
-              ? "✓ سود به صورت نقدی وصول شده و مستقیماً در سود محقق‌شده پورتفو لحاظ می‌شود."
+              ? "سود مجمع یک بار در عملکرد بورس محاسبه می‌شود. محل دریافت آن را برای تطبیق ارزش سبد مشخص کنید."
               : "⏳ سود در مجمع تصویب شده اما هنوز به حساب واریز نشده است (به عنوان سود در انتظار لحاظ می‌گردد)."}
           </p>
+          {status === "paid" && (
+            <>
+              <label style={{ display: "flex", alignItems: "flex-start", gap: "10px", marginTop: "12px" }}>
+                <input type="checkbox" checked={receivedOutside} onChange={(event) => setReceivedOutside(event.target.checked)} style={{ width: "auto", marginTop: "5px" }} />
+                <span>تأیید می‌کنم این سود <b>بیرون از حساب‌های ثبت‌شده در سبد</b> دریافت شده است (مثلاً حساب شخصی ثبت‌نشده). اگر در حساب داخل سبد بوده، این گزینه را نزنید؛ واریز را در معاملات با ماهیت «دریافت سود مجمع» ثبت/ویرایش و به همین مجمع وصل کنید.</span>
+              </label>
+              {onShowTransactions && <button type="button" className="button secondary small-btn" style={{ marginTop: "10px" }} onClick={onShowTransactions}>بررسی / ثبت واریز در معاملات</button>}
+            </>
+          )}
         </div>
 
         <div className="form-grid">
@@ -1532,8 +1816,10 @@ function fileToDataUrl(file: File): Promise<string> {
 
 export function AssetTransactionsModal({
   asset,
+  data,
   transactions,
   stockOrders,
+  focusTransactionId,
   onClose,
   onEditTx,
   onDeleteTx,
@@ -1543,8 +1829,10 @@ export function AssetTransactionsModal({
   onAddOrder,
 }: {
   asset: Asset;
+  data: PortfolioData;
   transactions: Transaction[];
   stockOrders?: StockOrder[];
+  focusTransactionId?: string;
   onClose: () => void;
   onEditTx?: (tx: Transaction) => void;
   onDeleteTx?: (tx: Transaction) => void;
@@ -1556,18 +1844,38 @@ export function AssetTransactionsModal({
   const [filterType, setFilterType] = useState<"all" | "buy" | "sell">("all");
   const [symbolQuery, setSymbolQuery] = useState("");
   const isBourse = asset.name === "بورس";
+  const isCash = assetMode(asset) === "cash";
 
   // Filter regular asset transactions
   const assetTxs = transactions
     .filter((tx) => tx.assetId === asset.id)
-    .sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.createdAt || "").localeCompare(a.createdAt || ""));
+    .sort((a, b) => Number(b.id === focusTransactionId) - Number(a.id === focusTransactionId) ||
+      (b.date || "").localeCompare(a.date || "") || (b.createdAt || "").localeCompare(a.createdAt || ""));
 
   const filteredTxs = assetTxs.filter((tx) => {
     if (filterType !== "all" && tx.type !== filterType) return false;
     return true;
   });
 
-  const orders = (stockOrders || []).sort(
+  // A cash account has no trustworthy intraday ordering for backfilled entries.
+  // Show the same day-end balance alongside every row of that day, not a made-up
+  // running balance based on the time the owner entered a transaction.
+  const cashDayEnd = new Map<string, number>();
+  if (isCash) {
+    const dayChanges = new Map<string, number>();
+    for (const tx of assetTxs) {
+      if (!validIsoDate(tx.date) || tx.date > todayIso() || !hasValidTradeAmounts(tx)) continue;
+      dayChanges.set(tx.date, (dayChanges.get(tx.date) || 0) +
+        (tx.type === "buy" ? 1 : -1) * tx.totalPrice);
+    }
+    let balance = 0;
+    for (const date of [...dayChanges.keys()].sort()) {
+      balance += dayChanges.get(date)!;
+      cashDayEnd.set(date, balance);
+    }
+  }
+
+  const orders = [...(stockOrders || [])].sort(
     (a, b) => (b.date || "").localeCompare(a.date || "")
   );
 
@@ -1590,8 +1898,8 @@ export function AssetTransactionsModal({
 
   return (
     <Modal
-      title={`سوابق معاملات دارایی «${asset.name}»`}
-      subtitle={`مشاهده و مدیریت تمام معاملات ثبت‌شده برای ${asset.name} (${asset.category || "دارایی"})`}
+      title={isCash ? `گردش حساب «${asset.name}»` : `سوابق معاملات دارایی «${asset.name}»`}
+      subtitle={isCash ? "ماندهٔ پایان هر روز از ردیف‌های ثبت‌شده محاسبه شده است؛ با صورت‌حساب واقعی تطبیق دهید." : `مشاهده و مدیریت تمام معاملات ثبت‌شده برای ${asset.name} (${asset.category || "دارایی"})`}
       onClose={onClose}
       wide
     >
@@ -1613,12 +1921,12 @@ export function AssetTransactionsModal({
             <b style={{ fontSize: "15px" }}>{nf.format(totalRowsCount)} معامله</b>
           </div>
           <div>
-            <span style={{ fontSize: "11px", color: "var(--muted)", display: "block" }}>مجموع خریدها</span>
-            <b className="negative-text" style={{ fontSize: "15px" }}>{money(totalBuy)}</b>
+            <span style={{ fontSize: "11px", color: "var(--muted)", display: "block" }}>{isCash ? "مجموع واریزهای ثبت‌شده" : "مجموع خریدها"}</span>
+            <b className={isCash ? "positive-text" : "negative-text"} style={{ fontSize: "15px" }}>{money(totalBuy)}</b>
           </div>
           <div>
-            <span style={{ fontSize: "11px", color: "var(--muted)", display: "block" }}>مجموع فروش‌ها</span>
-            <b className="positive-text" style={{ fontSize: "15px" }}>{money(totalSell)}</b>
+            <span style={{ fontSize: "11px", color: "var(--muted)", display: "block" }}>{isCash ? "مجموع برداشت‌های ثبت‌شده" : "مجموع فروش‌ها"}</span>
+            <b className={isCash ? "negative-text" : "positive-text"} style={{ fontSize: "15px" }}>{money(totalSell)}</b>
           </div>
           {asset.unit && (
             <div>
@@ -1627,6 +1935,12 @@ export function AssetTransactionsModal({
             </div>
           )}
         </div>
+        {isCash && <small style={{ color: "var(--muted)", lineHeight: 1.8 }}>
+          واریز به این حساب، لزوماً آوردهٔ بیرونی نیست. ماندهٔ پایان روز برای همهٔ ردیف‌های هم‌تاریخ یکسان نمایش داده می‌شود؛ ترتیب واقعی درون آن روز و موجودی ثبت‌نشدهٔ اولیه را از صورت‌حساب بررسی کنید.
+        </small>}
+        {focusTransactionId && assetTxs.some((tx) => tx.id === focusTransactionId) && (
+          <small style={{ color: "var(--primary)", lineHeight: 1.8 }}>ردیف مرتبطِ انتخاب‌شده برای بررسی در ابتدای جدول نشان داده شده است؛ برای اصلاح، ابتدا سند هر دو طرف را تطبیق دهید.</small>
+        )}
 
         {/* Toolbar with filter and Add button */}
         <div
@@ -1651,14 +1965,14 @@ export function AssetTransactionsModal({
               className={`button small-btn ${filterType === "buy" ? "primary" : "secondary"}`}
               onClick={() => setFilterType("buy")}
             >
-              خرید ({isBourse ? orders.filter((o) => o.type === "buy").length : assetTxs.filter((t) => t.type === "buy").length})
+              {isCash ? "واریز" : "خرید"} ({isBourse ? orders.filter((o) => o.type === "buy").length : assetTxs.filter((t) => t.type === "buy").length})
             </button>
             <button
               type="button"
               className={`button small-btn ${filterType === "sell" ? "primary" : "secondary"}`}
               onClick={() => setFilterType("sell")}
             >
-              فروش ({isBourse ? orders.filter((o) => o.type === "sell").length : assetTxs.filter((t) => t.type === "sell").length})
+              {isCash ? "برداشت" : "فروش"} ({isBourse ? orders.filter((o) => o.type === "sell").length : assetTxs.filter((t) => t.type === "sell").length})
             </button>
 
             {isBourse && (
@@ -1712,12 +2026,13 @@ export function AssetTransactionsModal({
           <table className="data-table">
             <thead>
               <tr>
-                <th>نوع معامله</th>
+                <th>{isCash ? "ماهیت گردش" : "نوع معامله"}</th>
                 {isBourse && <th>نماد</th>}
                 <th>تاریخ</th>
-                <th>مقدار / تعداد</th>
-                <th>نرخ واحد (تومان)</th>
+                {!isCash && <th>مقدار / تعداد</th>}
+                {!isCash && <th>نرخ واحد (تومان)</th>}
                 <th>مبلغ کل (تومان)</th>
+                {isCash && <th>ماندهٔ پایان روز</th>}
                 <th>توضیحات</th>
                 <th>عملیات</th>
               </tr>
@@ -1783,28 +2098,28 @@ export function AssetTransactionsModal({
               ) : (
                 filteredTxs.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="empty-state">
+                    <td colSpan={isCash ? 6 : 7} className="empty-state">
                       معامله‌ای برای این دارایی با فیلتر انتخابی ثبت نشده است.
                     </td>
                   </tr>
                 ) : (
                   filteredTxs.map((tx) => (
-                    <tr key={tx.id}>
+                    <tr key={tx.id} className={tx.id === focusTransactionId ? "capital-focused-transaction" : ""}>
                       <td>
-                        <span className={`pill-badge ${tx.type === "buy" ? "negative" : "positive"}`}>
-                          {tx.type === "buy" ? "خرید" : "فروش"}
+                        <span className={`pill-badge ${isCash ? (tx.type === "buy" ? "positive" : "negative") : (tx.type === "buy" ? "negative" : "positive")}`}>
+                          {isCash ? transactionLabel(tx, asset) : tx.type === "buy" ? "خرید" : "فروش"}
                         </span>
                       </td>
                       <td>{toPersianDate(tx.date)}</td>
-                      <td>
-                        <b>{nf.format(tx.quantity)}</b> {asset.unit || "واحد"}
-                      </td>
-                      <td>{money(tx.unitPrice)}</td>
-                      <td>
-                        <b>{money(tx.totalPrice)}</b>
-                      </td>
+                      {!isCash && <td><b>{nf.format(tx.quantity)}</b> {asset.unit || "واحد"}</td>}
+                      {!isCash && <td>{money(tx.unitPrice)}</td>}
+                      <td><b>{money(tx.totalPrice)}</b></td>
+                      {isCash && <td className={(cashDayEnd.get(tx.date) ?? 0) < -0.01 ? "negative-text" : ""}>
+                        {validIsoDate(tx.date) && tx.date <= todayIso() && hasValidTradeAmounts(tx) && cashDayEnd.has(tx.date)
+                          ? money(cashDayEnd.get(tx.date)!) : "این ردیف در ماندهٔ امروز لحاظ نشده"}
+                      </td>}
                       <td style={{ color: "var(--muted)", fontSize: "12px", whiteSpace: "pre-line", lineHeight: 1.4 }}>
-                        {tx.notes || "—"}
+                        {describeTransactionNote(data, tx) || "—"}
                       </td>
                       <td>
                         <div className="table-actions">
@@ -1847,24 +2162,30 @@ export function CapitalIncreaseModal({
   onSave,
   assets,
   targetAssetId = "asset-bank",
+  initialSource = "آورده نقدی جدید",
+  beforeDate,
 }: {
   onClose: () => void;
-  onSave: (amount: number, date: string, source: string, note: string, targetAssetId: string) => void;
+  onSave: (amount: number, date: string, source: string, note: string, targetAssetId: string, initial: boolean) => void;
   assets: Asset[];
   targetAssetId?: string;
+  initialSource?: string;
+  beforeDate?: string;
 }) {
   const [selectedAssetId, setSelectedAssetId] = useState(targetAssetId);
   const [amount, setAmount] = useState("");
-  const [date, setDate] = useState(todayIso());
-  const [source, setSource] = useState("آورده نقدی جدید");
+  // When opened from an old shortfall, today is NOT a valid default for its funding.
+  const [date, setDate] = useState(beforeDate ? "" : todayIso());
+  const [source, setSource] = useState(initialSource);
+  const [isInitial, setIsInitial] = useState(initialSource === "سرمایه اولیه");
   const [note, setNote] = useState("");
 
   const numAmount = num(amount);
 
   const save = (e: FormEvent) => {
     e.preventDefault();
-    if (numAmount <= 0) return;
-    onSave(numAmount, date, source, note, selectedAssetId);
+    if (numAmount <= 0 || !validIsoDate(date) || date > todayIso() || (beforeDate && date > beforeDate)) return;
+    onSave(numAmount, date, source, note, selectedAssetId, isInitial);
     onClose();
   };
 
@@ -1888,17 +2209,7 @@ export function CapitalIncreaseModal({
           <span>حساب مقصد دریافت آورده</span>
           <select value={selectedAssetId} onChange={(e) => setSelectedAssetId(e.target.value)}>
             {assets
-              .filter(
-                (a) =>
-                  a.id === "asset-bank" ||
-                  a.id === "asset-hami" ||
-                  a.id === "asset-kian" ||
-                  a.id === "asset-deposit-cash" ||
-                  a.name.includes("دفتر گواهی") ||
-                  a.category === "نقد" ||
-                  a.category === "صندوق درآمد ثابت" ||
-                  a.category === "دفتر نقدینگی"
-              )
+              .filter((a) => assetMode(a) === "cash")
               .map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name} ({a.category || "نقدینگی"})
@@ -1907,6 +2218,16 @@ export function CapitalIncreaseModal({
           </select>
         </label>
 
+        <label>
+          <span>زمان ورود این پول به سبد</span>
+          <select value={isInitial ? "initial" : "later"} onChange={(e) => setIsInitial(e.target.value === "initial")}>
+            <option value="initial">آوردهٔ اولیه (پول شروع سرمایه‌گذاری)</option>
+            <option value="later">آوردهٔ جدید پس از شروع</option>
+          </select>
+          <small style={{ color: "var(--muted)", lineHeight: 1.8 }}>
+            اگر این پول قبلاً با خرید دارایی یا اصلاح مانده در سبد آمده، ردیف قبلی را ویرایش کنید؛ ثبت دوباره مبلغ سبد را بیشتر از واقع نشان می‌دهد.
+          </small>
+        </label>
         <label>
           <span>مبلغ افزایش سرمایه (تومان)</span>
           <input
@@ -1937,7 +2258,7 @@ export function CapitalIncreaseModal({
                 type="button"
                 className={`button small-btn ${source === s ? "primary" : "ghost"}`}
                 style={{ fontSize: "11px", padding: "4px 8px", minHeight: "auto" }}
-                onClick={() => setSource(s)}
+                onClick={() => { setSource(s); if (s === "سرمایه اولیه") setIsInitial(true); }}
               >
                 {s}
               </button>
@@ -1951,8 +2272,10 @@ export function CapitalIncreaseModal({
         </label>
 
         <label>
-          <span>تاریخ واریز وجه</span>
-          <JalaliDatePicker value={date} onChange={setDate} />
+          <span>تاریخ واقعی واریز وجه *</span>
+          <JalaliDatePicker value={date} onChange={setDate} referenceDate={beforeDate} maxDate={beforeDate || todayIso()} />
+          {beforeDate && <small style={{ color: "var(--muted)", lineHeight: 1.8 }}>برای توضیح کسری تاریخی، واریز باید با سند واقعی در تاریخ {toPersianDate(beforeDate)} یا قبل از آن انجام شده باشد. تاریخ امروز پیش‌فرض نشده است؛ انتقال موجود را دوباره ثبت نکنید.</small>}
+          {beforeDate && date && date > beforeDate && <small className="negative-text">این تاریخ بعد از کسری حساب است و آن را رفع نمی‌کند.</small>}
         </label>
 
         <label>
@@ -1968,7 +2291,7 @@ export function CapitalIncreaseModal({
           <button type="button" className="button secondary" onClick={onClose}>
             انصراف
           </button>
-          <button type="submit" className="button primary" disabled={numAmount <= 0}>
+          <button type="submit" className="button primary" disabled={numAmount <= 0 || !validIsoDate(date) || date > todayIso() || Boolean(beforeDate && date > beforeDate)}>
             ثبت افزایش سرمایه {numAmount > 0 ? `(${money(numAmount)})` : ""}
           </button>
         </div>

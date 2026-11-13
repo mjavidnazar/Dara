@@ -32,6 +32,8 @@ import {
   Modal,
   PriceModalBulk,
   StockOrderModal,
+  StockPriceHistoryModal,
+  StockDividendModal,
   TransactionModal,
 } from "./components/Modals";
 import {
@@ -44,23 +46,30 @@ import {
 } from "./components/Views";
 import { loadData, saveData } from "./lib/db";
 import {
+  assetMode,
   calculateBourseSummary,
   emptyData,
+  hasValidStockOrder,
   metricsAt,
-  migrateKianStockData,
   money,
   nf,
   normalizeSymbol,
   portfolioTimeline,
-  sanitizeHamiData,
+  isCashAccount,
+  isGeneratedStockTransfer,
   stockMetrics,
   syncStockCashTransfers,
   todayIso,
   toPersianDate,
   transactionLabel,
   uid,
+  validIsoDate,
 } from "./lib/portfolio";
-import { sampleData } from "./lib/sample";
+import { isPortfolioBackup, preparePortfolioData } from "./lib/restore";
+import { analyzeCapital } from "./lib/capitalReport";
+import type { AuditTarget } from "./lib/capitalReport";
+import { autoRemovedCounterparts, linkedTransactions, removeTransaction, upsertTransaction } from "./lib/transactionLinks";
+import { describeTransactionNote } from "./lib/transactionDescriptions";
 import { exportPortfolioPdf } from "./lib/pdfExport";
 import type {
   Asset,
@@ -154,23 +163,37 @@ function download(name: string, data: BlobPart, type: string) {
 }
 
 function exportCsv(data: PortfolioData) {
+  const kindNames: Record<NonNullable<Transaction["kind"]>, string> = {
+    opening_capital: "آورده اولیه", capital_in: "آورده جدید", capital_out: "برداشت بیرونی",
+    trade: "معامله داخلی", transfer: "انتقال داخلی", interest: "سود حساب",
+    stock_dividend: "دریافت سود مجمع", fee: "کارمزد/هزینه", balance_adjustment: "اصلاح مانده نامشخص",
+  };
   const rows = [
-    ["شناسه", "نوع معامله", "دارایی", "تاریخ", "تعداد", "قیمت واحد (تومان)", "مبلغ کل (تومان)", "یادداشت"],
+    ["شناسه", "نوع معامله", "دارایی", "ماهیت پول", "حساب مبدأ", "حساب مقصد", "ردیف مرتبط", "سود مجمع مرتبط", "تاریخ شمسی", "تاریخ میلادی (ISO)", "تعداد", "قیمت واحد (تومان)", "مبلغ کل (تومان)", "یادداشت", "یادداشت اصلی (فنی؛ برای پیوندها)"],
     ...data.transactions.map((tx) => {
       const asset = data.assets.find((item) => item.id === tx.assetId);
       return [
         tx.id,
         transactionLabel(tx, asset),
         asset?.name ?? "—",
+        tx.kind ? kindNames[tx.kind] : "تعیین‌نشده",
+        data.assets.find((item) => item.id === tx.sourceAssetId)?.name ?? "",
+        data.assets.find((item) => item.id === tx.destinationAssetId)?.name ?? "",
+        tx.linkedTransactionId ?? "",
+        tx.stockDividendId ?? "",
         toPersianDate(tx.date),
+        tx.date,
         tx.quantity,
         tx.unitPrice,
         tx.totalPrice,
-        `"${(tx.notes ?? "").replace(/"/g, '""')}"`,
+        describeTransactionNote(data, tx),
+        tx.notes ?? "",
       ];
     }),
   ];
-  const csv = "\uFEFF" + rows.map((row) => row.join(",")).join("\n");
+  const csv = "\uFEFF" + rows.map((row) =>
+    row.map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(",")
+  ).join("\r\n");
   download(`dara-transactions-${todayIso()}.csv`, csv, "text/csv;charset=utf-8");
 }
 
@@ -213,7 +236,9 @@ function notifyThemeChange() {
 }
 
 export default function App() {
-  const [data, setData] = useState<PortfolioData>(() => sampleData());
+  // Never display demo holdings as if they belonged to a new visitor. Real
+  // records are restored explicitly from a local JSON file or this browser.
+  const [data, setData] = useState<PortfolioData>(() => emptyData());
   const [view, setView] = useState<View>("dashboard");
   const [mobileMenu, setMobileMenu] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
@@ -245,20 +270,30 @@ export default function App() {
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
   const [quickTxAssetId, setQuickTxAssetId] = useState<string | undefined>(undefined);
   const [priceModal, setPriceModal] = useState(false);
+  const [priceFocusAssetId, setPriceFocusAssetId] = useState<string | null>(null);
+  const [priceFocusHistoryId, setPriceFocusHistoryId] = useState<string | null>(null);
+  const [stockPriceModal, setStockPriceModal] = useState(false);
+  const [stockPriceFocusId, setStockPriceFocusId] = useState<string | null>(null);
   const [kianModal, setKianModal] = useState(false);
   const [hamiModal, setHamiModal] = useState(false);
   const [copyModalAsset, setCopyModalAsset] = useState<Asset | null>(null);
   const [viewingTxAsset, setViewingTxAsset] = useState<Asset | null>(null);
+  const [viewingTxFocusId, setViewingTxFocusId] = useState<string | undefined>();
   const [stockOrderModal, setStockOrderModal] = useState(false);
   const [editingStockOrder, setEditingStockOrder] = useState<StockOrder | null>(null);
+  const [auditDividendId, setAuditDividendId] = useState<string | null>(null);
   const [capitalIncreaseModal, setCapitalIncreaseModal] = useState(false);
   const [capitalIncreaseTargetId, setCapitalIncreaseTargetId] = useState<string>("asset-bank");
+  const [capitalIncreaseSource, setCapitalIncreaseSource] = useState("آورده نقدی جدید");
+  const [capitalIncreaseBeforeDate, setCapitalIncreaseBeforeDate] = useState<string | undefined>();
   const [liquidityModal, setLiquidityModal] = useState(false);
   const [liquidityFromId, setLiquidityFromId] = useState<string>("asset-bank");
   const [liquidityToId, setLiquidityToId] = useState<string>("asset-hami");
   const [confirmState, setConfirmState] = useState<{
     title: string;
     message: string;
+    confirmText?: string;
+    confirmKind?: "danger" | "primary";
     onConfirm: () => void;
   } | null>(null);
 
@@ -269,73 +304,14 @@ export default function App() {
 
   const isLoadedRef = useRef(false);
 
-  // Load initial data from localStorage
+  // Restore only records already in this browser. A private backup is selected
+  // explicitly by its owner; no demo ledger and no server-side file fetch.
   useEffect(() => {
     async function init() {
       try {
         const stored = await loadData();
-        if (stored && Array.isArray(stored.assets) && stored.assets.length > 0) {
-          // Separate Kian fund transactions from bourse stocks and clean previous data
-          const { data: migratedData } = migrateKianStockData(stored);
-
-          const cleanTxs = syncStockCashTransfers(
-            migratedData.transactions || [],
-            migratedData.stockOrders || [],
-            migratedData.assets || []
-          );
-
-          // Ensure commodity assets (copper, zinc, rebar) have deposit certificate info set
-          const updatedAssets = migratedData.assets.map((asset) => {
-            if (asset.id === "asset-mes" || asset.name.includes("مس")) {
-              return {
-                ...asset,
-                isDepositCertificate: asset.isDepositCertificate ?? true,
-                depositSymbol: asset.depositSymbol ?? "مس (تمام نمادهای مس کاتد و مفتول)",
-              };
-            }
-            if (asset.id === "asset-roy" || asset.name.includes("روی")) {
-              return {
-                ...asset,
-                isDepositCertificate: asset.isDepositCertificate ?? true,
-                depositSymbol: asset.depositSymbol ?? "روی (شمش روی)",
-              };
-            }
-            if (asset.id === "asset-milgerd" || asset.name.includes("میلگرد")) {
-              return {
-                ...asset,
-                isDepositCertificate: asset.isDepositCertificate ?? true,
-                depositSymbol: asset.depositSymbol ?? "میلگرد (تمام نمادهای میلگرد بورس کالا)",
-              };
-            }
-            return asset;
-          });
-
-          // Ensure "دفتر گواهی سپرده" cash ledger exists
-          const hasDepositCash = updatedAssets.some(
-            (a) => a.id === "asset-deposit-cash" || a.name.includes("دفتر گواهی")
-          );
-          if (!hasDepositCash) {
-            updatedAssets.push({
-              id: "asset-deposit-cash",
-              name: "دفتر گواهی سپرده",
-              category: "دفتر نقدینگی",
-              unit: "تومان",
-              currentPrice: 1,
-              annualInterestRate: 0,
-              color: "#0284c7",
-              notes: "حساب نقدینگی و تسویه معاملات گواهی سپرده کالایی بورس کالا",
-              createdAt: "2026-08-01T19:06:18.503Z",
-            });
-          }
-
-          const preparedData = {
-            ...migratedData,
-            assets: updatedAssets,
-            transactions: cleanTxs,
-          };
-          const { data: sanitizedData } = sanitizeHamiData(preparedData);
-          setData(sanitizedData);
-        }
+        const prepared = stored ? preparePortfolioData(stored) : null;
+        if (prepared) setData(prepared);
       } catch (err) {
         console.warn("Storage load error:", err);
       } finally {
@@ -362,21 +338,29 @@ export default function App() {
     [data.assets, data.transactions, data.prices]
   );
 
+  const currentOrders = useMemo(
+    () => data.stockOrders.filter((order) => validIsoDate(order.date) && order.date <= todayIso() && hasValidStockOrder(order)),
+    [data.stockOrders]
+  );
   const stockData = useMemo(
-    () => stockMetrics(data.stockOrders, data.stockPrices, data.stockDividends),
-    [data.stockOrders, data.stockPrices, data.stockDividends]
+    () => stockMetrics(
+      currentOrders,
+      data.stockPrices.filter((price) => price.date <= todayIso()),
+      data.stockDividends.filter((dividend) => dividend.date <= todayIso())
+    ),
+    [currentOrders, data.stockPrices, data.stockDividends]
   );
 
   const stockSummary = useMemo(
     () =>
       calculateBourseSummary(
         stockData,
-        data.stockOrders,
+        currentOrders,
         data.assets,
         data.transactions,
         data.prices
       ),
-    [stockData, data.stockOrders, data.assets, data.transactions, data.prices]
+    [stockData, currentOrders, data.assets, data.transactions, data.prices]
   );
 
   // Replace Bourse asset in presentation metrics with live stock portfolio values
@@ -412,6 +396,12 @@ export default function App() {
     return sumCost > 0 ? sumCost : Math.max(0, totalValue - totalProfit);
   }, [presentationMetrics, totalValue, totalProfit]);
 
+  const capitalReport = useMemo(
+    () => analyzeCapital(data, totalValue, totalProfit),
+    [data, totalValue, totalProfit]
+  );
+  const auditDividend = data.stockDividends.find((dividend) => dividend.id === auditDividendId);
+  // This badge is a cost-basis ratio, NOT the owner's initial invested capital.
   const totalProfitPercent = totalCost > 0 ? (totalProfit / totalCost) * 100 : 0;
 
   const assetSegments = useMemo(
@@ -526,6 +516,168 @@ export default function App() {
         err?.message || "ارتباط با سرویس قیمت‌های بورس برقرار نشد.",
         "error"
       );
+    }
+  };
+
+  const hasDuplicateTransactionId = (tx: Transaction) =>
+    data.transactions.filter((item) => item.id === tx.id).length > 1;
+
+  const openTransactionForEdit = (tx: Transaction) => {
+    if (hasDuplicateTransactionId(tx)) {
+      notify("چند تراکنش با این شناسه وجود دارد؛ ویرایش تکی امن نیست. فایل پشتیبان را بررسی کنید.", "error");
+      return;
+    }
+    if (isGeneratedStockTransfer(tx)) {
+      const orderId = tx.notes?.match(/\[stock-order:([^\]]+)\]/)?.[1] || tx.id.replace(/^hami-stock-(buy|sell|sale)-/, "");
+      const order = data.stockOrders.find((item) => item.id === orderId);
+      if (order) {
+        setEditingStockOrder(order);
+        setStockOrderModal(true);
+      } else notify("سفارش متناظر این تسویه پیدا نشد؛ از فایل پشتیبان یا گزارش خطا بررسی کنید.", "error");
+      return;
+    }
+    const linked = linkedTransactions(data, tx);
+    const parent = linked.find((item) => item.sourceAssetId || item.destinationAssetId);
+    const target = parent && !tx.sourceAssetId && !tx.destinationAssetId ? parent : tx;
+    if (hasDuplicateTransactionId(target) || linked.some(hasDuplicateTransactionId)) {
+      notify("شناسهٔ یکی از ردیف‌های پیوندخورده تکراری است؛ ویرایش امن نیست. فایل پشتیبان را بررسی کنید.", "error");
+      return;
+    }
+    setEditingTx(target);
+    setQuickTxAssetId(undefined);
+    setTxModal(true);
+  };
+
+  const confirmStockOrderDeletion = (id: string) => {
+    const order = data.stockOrders.find((item) => item.id === id);
+    setConfirmState({
+      title: "حذف سفارش بورس",
+      message: `آیا از حذف سفارش ${order?.symbol || "بورس"} به مبلغ ${money(order?.totalPrice || 0)} مطمئن هستید؟ تسویهٔ نقدی آن نیز به‌روز می‌شود.`,
+      onConfirm: () => {
+        setData((prev) => {
+          const stockOrders = prev.stockOrders.filter((item) => item.id !== id);
+          return { ...prev, stockOrders, transactions: syncStockCashTransfers(prev.transactions, stockOrders, prev.assets) };
+        });
+        notify("سفارش و تسویهٔ نقدی مربوط حذف شد.");
+      },
+    });
+  };
+
+  const confirmTransactionDeletion = (tx: Transaction) => {
+    if (hasDuplicateTransactionId(tx)) {
+      notify("چند تراکنش با این شناسه وجود دارد؛ حذف تکی امن نیست. فایل پشتیبان را بررسی کنید.", "error");
+      return;
+    }
+    if (isGeneratedStockTransfer(tx)) {
+      const orderId = tx.notes?.match(/\[stock-order:([^\]]+)\]/)?.[1] || tx.id.replace(/^hami-stock-(buy|sell|sale)-/, "");
+      confirmStockOrderDeletion(orderId);
+      return;
+    }
+    const linkedCount = linkedTransactions(data, tx).length;
+    const removedPairs = autoRemovedCounterparts(data, tx);
+    if (removedPairs.some(hasDuplicateTransactionId)) {
+      notify("شناسهٔ ردیف مرتبط تکراری است؛ حذف امن نیست. فایل پشتیبان را بررسی کنید.", "error");
+      return;
+    }
+    const removedCount = removedPairs.length;
+    const inferredRemoval = removedPairs.some((other) =>
+      tx.linkedTransactionId !== other.id || other.linkedTransactionId !== tx.id);
+    const inferredPair = linkedCount > removedCount;
+    const brokenLink = !linkedCount && (tx.linkedTransactionId ||
+      data.transactions.some((item) => item.linkedTransactionId === tx.id));
+    setConfirmState({
+      title: "حذف معامله",
+      message: `آیا از حذف معامله به مبلغ ${money(tx.totalPrice)} مطمئن هستید؟${removedCount ? ` ${removedCount} طرف نقدیِ مرتبط نیز حذف می‌شود.` : ""}${inferredRemoval ? " این ارتباط بر اساس ثبت قدیمی و مبلغ/تاریخ تطبیق داده شده، نه پیوند دوطرفهٔ صریح؛ پیش از تأیید هر دو سند را بررسی کنید." : ""}${inferredPair ? " یک طرف مقابلِ احتمالی در حساب دیگر پیدا شده؛ این ردیف حذف نمی‌شود و پس از حذف باید جداگانه بررسی شود." : ""}${brokenLink ? " پیوند این ردیف ناهماهنگ است؛ طرف مقابل خودکار حذف نمی‌شود و باید جداگانه بررسی شود." : ""}`,
+      onConfirm: () => {
+        setData((prev) => removeTransaction(prev, tx));
+        notify(removedCount ? "ردیف و طرف نقدیِ مرتبط، پس از تأیید شما حذف شدند." : "فقط همین ردیف حذف شد؛ سایر تراکنش‌ها تغییر نکردند.");
+      },
+    });
+  };
+
+  const openCapitalDeposit = (source: string, preferredId?: string, beforeDate?: string) => {
+    const account = data.assets.find((asset) => asset.id === preferredId && isCashAccount(asset)) ||
+      data.assets.find((asset) => asset.id === "asset-bank" && isCashAccount(asset)) ||
+      data.assets.find((asset) => isCashAccount(asset));
+    if (!account) {
+      setView("assets");
+      notify("ابتدا یک حساب نقدی در بخش دارایی‌ها تعریف کنید؛ سپس آورده را ثبت کنید.", "error");
+      return;
+    }
+    setCapitalIncreaseTargetId(account.id);
+    setCapitalIncreaseSource(source);
+    setCapitalIncreaseBeforeDate(beforeDate);
+    setCapitalIncreaseModal(true);
+  };
+
+  const saveDividend = (dividend: StockDividend) => {
+    setData((prev) => ({
+      ...prev,
+      stockDividends: [...prev.stockDividends.filter((item) => item.id !== dividend.id), dividend],
+    }));
+    if (auditDividendId === dividend.id) setAuditDividendId(null);
+    notify(`سود مجمع ${dividend.symbol} ثبت شد؛ محل دریافت آن در گزارش بازبینی می‌شود.`);
+  };
+
+  const toggleDividend = (dividend: StockDividend, targetStatus?: "pending" | "paid") => {
+    const nextStatus = targetStatus ?? (dividend.status === "paid" ? "pending" : "paid");
+    setData((prev) => ({
+      ...prev,
+      stockDividends: prev.stockDividends.map((item) => item.id === dividend.id
+        ? { ...item, status: nextStatus, receivedOutside: undefined } : item),
+    }));
+    if (auditDividendId === dividend.id) setAuditDividendId(null);
+    notify(`سود مجمع ${dividend.symbol} به ${nextStatus === "paid" ? "محقق‌شده" : "در انتظار"} تغییر یافت؛ محل دریافت را بازبینی کنید.`);
+  };
+
+  const deleteDividend = (id: string) => {
+    setData((prev) => ({
+      ...prev,
+      stockDividends: prev.stockDividends.filter((item) => item.id !== id),
+    }));
+    if (auditDividendId === id) setAuditDividendId(null);
+    notify("سود مجمع حذف شد؛ اگر واریزی به آن پیوند خورده بود، ردیف واریز را بازبینی کنید.");
+  };
+
+  const resolveAuditIssue = (target: AuditTarget) => {
+    if (target.type === "transaction") {
+      const tx = data.transactions.find((item) => item.id === target.id);
+      if (tx) openTransactionForEdit(tx);
+      else notify("ردیف معامله پیدا نشد. فایل پشتیبان را بررسی کنید.", "error");
+    } else if (target.type === "stockOrder") {
+      const order = data.stockOrders.find((item) => item.id === target.id);
+      if (order) {
+        setEditingStockOrder(order);
+        setStockOrderModal(true);
+      } else notify("سفارش پیدا نشد.", "error");
+    } else if (target.type === "asset") {
+      const asset = data.assets.find((item) => item.id === target.id);
+      if (asset) { setEditingAsset(asset); setAssetModal(true); }
+      else notify("دارایی پیدا نشد؛ فایل پشتیبان را بررسی کنید.", "error");
+    } else if (target.type === "price") {
+      const asset = data.assets.find((item) => item.id === target.id);
+      if (target.recordId) {
+        setPriceFocusAssetId(target.id ?? null);
+        setPriceFocusHistoryId(target.recordId);
+        setPriceModal(true);
+      } else if (asset && assetMode(asset) === "copy") setCopyModalAsset(asset);
+      else if (target.id) { setPriceFocusAssetId(target.id); setPriceFocusHistoryId(null); setPriceModal(true); }
+      else {
+        setView("stocks");
+        notify("قیمت نماد را در بخش بورس به‌روزرسانی کنید.");
+      }
+    } else if (target.type === "stockPrice") {
+      if (data.stockPrices.some((item) => item.id === target.id)) {
+        setStockPriceFocusId(target.id);
+        setStockPriceModal(true);
+      } else notify("رکورد قیمت سهام پیدا نشد؛ فایل پشتیبان را بررسی کنید.", "error");
+    } else if (target.type === "dividend") {
+      const dividend = data.stockDividends.find((item) => item.id === target.id);
+      if (dividend) setAuditDividendId(dividend.id);
+      else notify("ردیف سود مجمع پیدا نشد؛ فایل پشتیبان را بررسی کنید.", "error");
+    } else {
+      setView("transactions");
+      notify("اگر پول قبلاً در سبد ثبت شده، همان تراکنش را ویرایش کنید؛ آن را دوباره واریز نکنید.");
     }
   };
 
@@ -651,7 +803,7 @@ export default function App() {
             <button
               type="button"
               className="button secondary"
-              onClick={() => setPriceModal(true)}
+              onClick={() => { setPriceFocusAssetId(null); setPriceFocusHistoryId(null); setPriceModal(true); }}
             >
               <RefreshCw size={18} /> به‌روزرسانی قیمت
             </button>
@@ -689,6 +841,9 @@ export default function App() {
               onSetKianBalance={() => setKianModal(true)}
               onShowTransactions={() => setView("transactions")}
               onNavigateToStocks={() => setView("stocks")}
+              capitalReport={capitalReport}
+              onShowCapitalReport={() => setView("reports")}
+              onImportBackup={() => backupImportRef.current?.click()}
             />
           )}
 
@@ -696,6 +851,7 @@ export default function App() {
             <StocksDashboardView
               items={stockData}
               data={data}
+              onManagePrices={() => { setStockPriceFocusId(null); setStockPriceModal(true); }}
               onSavePrices={(updates: StockPrice[]) => {
                 setData((prev) => ({
                   ...prev,
@@ -737,13 +893,16 @@ export default function App() {
                 direction: "deposit" | "withdraw",
                 amount: number,
                 date: string,
-                note: string
+                note: string,
+                source: "bank" | "external"
               ) => {
                 const hami = data.assets.find((a) => a.name.includes("حامی"));
                 if (!hami) {
                   notify("دارایی «صندوق درآمد ثابت حامی» یافت نشد.", "error");
                   return;
                 }
+                const bank = data.assets.find((a) => a.id === "asset-bank" || a.name === "بانک");
+                const fromBank = source === "bank" && Boolean(bank);
                 const tx: Transaction = {
                   id: uid(`hami-${direction}`),
                   assetId: hami.id,
@@ -752,65 +911,23 @@ export default function App() {
                   unitPrice: 1,
                   totalPrice: amount,
                   date,
-                  notes:
-                    note ||
-                    (direction === "deposit"
-                      ? "واریز وجه نقد به کارگزاری (حامی)"
-                      : "برداشت وجه نقد از کارگزاری (حامی)"),
+                  notes: note || (direction === "deposit" ? "واریز وجه به حامی" : "برداشت وجه از حامی"),
                   attachmentIds: [],
-                  kind: "transfer",
+                  kind: fromBank ? "transfer" : direction === "deposit" ? "capital_in" : "capital_out",
+                  sourceAssetId: fromBank && direction === "deposit" ? bank!.id : undefined,
+                  destinationAssetId: fromBank && direction === "withdraw" ? bank!.id : undefined,
                   createdAt: new Date().toISOString(),
                 };
-                setData((prev) => ({
-                  ...prev,
-                  transactions: [...prev.transactions, tx],
-                }));
+                setData((prev) => upsertTransaction(prev, tx, []));
                 notify(
                   direction === "deposit"
                     ? "واریز وجه نقد به صندوق حامی ثبت شد."
                     : "برداشت وجه نقد از صندوق حامی ثبت شد."
                 );
               }}
-              onDividend={(dividend: StockDividend) => {
-                setData((prev) => ({
-                  ...prev,
-                  stockDividends: [
-                    ...prev.stockDividends.filter((d) => d.id !== dividend.id),
-                    dividend,
-                  ],
-                }));
-                notify(
-                  dividend.status === "paid"
-                    ? `سود مجمع ${dividend.symbol} به عنوان «محقق‌شده» ثبت شد.`
-                    : `سود مجمع ${dividend.symbol} به عنوان «محقق‌نشده (در انتظار)» ثبت شد.`
-                );
-              }}
-              onToggleDividend={(dividend: StockDividend, targetStatus?: "pending" | "paid") => {
-                const nextStatus = targetStatus ?? (dividend.status === "paid" ? "pending" : "paid");
-                const updated: StockDividend = {
-                  ...dividend,
-                  status: nextStatus,
-                };
-                setData((prev) => ({
-                  ...prev,
-                  stockDividends: prev.stockDividends.map((d) =>
-                    d.id === dividend.id ? updated : d
-                  ),
-                }));
-                notify(
-                  nextStatus === "paid"
-                    ? `سود مجمع ${dividend.symbol} به «محقق‌شده ✓» تغییر یافت.`
-                    : `سود مجمع ${dividend.symbol} به «محقق‌نشده (در انتظار) ⏳» تغییر یافت.`
-                );
-              }}
-              onDeleteDividend={(id: string) => {
-                const item = data.stockDividends.find((d) => d.id === id);
-                setData((prev) => ({
-                  ...prev,
-                  stockDividends: prev.stockDividends.filter((d) => d.id !== id),
-                }));
-                notify(`سود مجمع ${item ? item.symbol : ""} با موفقیت حذف شد.`);
-              }}
+              onDividend={saveDividend}
+              onToggleDividend={toggleDividend}
+              onDeleteDividend={deleteDividend}
               onEditOrder={(order: StockOrder) => {
                 const orders = data.stockOrders.map((o) => (o.id === order.id ? order : o));
                 setData((prev) => ({
@@ -840,13 +957,10 @@ export default function App() {
                 setQuickTxAssetId(asset.id);
                 setTxModal(true);
               }}
-              onPrice={() => setPriceModal(true)}
+              onPrice={() => { setPriceFocusAssetId(null); setPriceFocusHistoryId(null); setPriceModal(true); }}
               onUpdateCopy={(asset: Asset) => setCopyModalAsset(asset)}
-              onViewTransactions={(asset: Asset) => setViewingTxAsset(asset)}
-              onCapitalIncrease={(targetAssetId?: string) => {
-                setCapitalIncreaseTargetId(targetAssetId || "asset-bank");
-                setCapitalIncreaseModal(true);
-              }}
+              onViewTransactions={(asset: Asset) => { setViewingTxFocusId(undefined); setViewingTxAsset(asset); }}
+              onCapitalIncrease={(targetAssetId?: string) => openCapitalDeposit("آورده نقدی جدید", targetAssetId)}
               onLiquidityTransfer={(defaultFromId?: string, defaultToId?: string) => {
                 if (defaultFromId) {
                   setLiquidityFromId(defaultFromId);
@@ -861,14 +975,17 @@ export default function App() {
                   title: `حذف دارایی «${asset.name}»`,
                   message: `آیا از حذف دارایی «${asset.name}» و ${nf.format(related.length)} معاملهٔ وابسته به آن اطمینان دارید؟ این عمل غیرقابل بازگشت است.`,
                   onConfirm: () => {
-                    const attachmentIds = new Set(related.flatMap((tx) => tx.attachmentIds));
-                    setData((prev) => ({
-                      ...prev,
-                      assets: prev.assets.filter((item) => item.id !== asset.id),
-                      transactions: prev.transactions.filter((tx) => tx.assetId !== asset.id),
-                      prices: prev.prices.filter((item) => item.assetId !== asset.id),
-                      attachments: prev.attachments.filter((item) => !attachmentIds.has(item.id)),
-                    }));
+                    setData((prev) => {
+                      const cleared = prev.transactions.filter((tx) => tx.assetId === asset.id && !isGeneratedStockTransfer(tx))
+                        .reduce((state, tx) => removeTransaction(state, tx), prev);
+                      const assets = cleared.assets.filter((item) => item.id !== asset.id);
+                      return {
+                        ...cleared,
+                        assets,
+                        transactions: syncStockCashTransfers(cleared.transactions.filter((tx) => tx.assetId !== asset.id), cleared.stockOrders, assets),
+                        prices: cleared.prices.filter((item) => item.assetId !== asset.id),
+                      };
+                    });
                     notify("دارایی و داده‌های وابسته حذف شد.");
                   },
                 });
@@ -879,30 +996,14 @@ export default function App() {
           {view === "transactions" && (
             <TransactionsView
               data={data}
+              capitalReport={capitalReport}
+              onShowReport={() => setView("reports")}
               onAdd={() => {
                 setEditingTx(null);
                 setTxModal(true);
               }}
-              onEdit={(tx: Transaction) => {
-                setEditingTx(tx);
-                setTxModal(true);
-              }}
-              onDelete={(tx: Transaction) => {
-                setConfirmState({
-                  title: "حذف معامله",
-                  message: "آیا از حذف این معامله اطمینان دارید؟ محاسبات پرتفوی بازسازی خواهد شد.",
-                  onConfirm: () => {
-                    const relatedCashId = `deposit-trade:${tx.id}`;
-                    setData((prev) => ({
-                      ...prev,
-                      transactions: prev.transactions.filter(
-                        (t) => t.id !== tx.id && !t.notes?.includes(relatedCashId)
-                      ),
-                    }));
-                    notify("معامله حذف شد.");
-                  },
-                });
-              }}
+              onEdit={openTransactionForEdit}
+              onDelete={confirmTransactionDeletion}
               onCsv={() => exportCsv(data)}
               onPdf={handlePortfolioPdf}
               onStockImport={() => stockImportRef.current?.click()}
@@ -910,31 +1011,12 @@ export default function App() {
                 setEditingStockOrder(order);
                 setStockOrderModal(true);
               }}
-              onDeleteStockOrder={(id: string) => {
-                const target = data.stockOrders?.find((o) => o.id === id);
-                setConfirmState({
-                  title: "حذف معامله بورس",
-                  message: `آیا از حذف معامله ${target?.symbol || "بورس"} به مبلغ ${money(target?.totalPrice || 0)} اطمینان دارید؟ تسویه صندوق حامی به طور خودکار اصلاح خواهد شد.`,
-                  onConfirm: () => {
-                    const remainingOrders = (data.stockOrders || []).filter((o) => o.id !== id);
-                    const updatedTxs = syncStockCashTransfers(data.transactions, remainingOrders, data.assets);
-                    setData((prev) => ({
-                      ...prev,
-                      stockOrders: remainingOrders,
-                      transactions: updatedTxs,
-                    }));
-                    notify("معامله بورس حذف شد و مانده تسویه حامی اصلاح گردید.");
-                  },
-                });
-              }}
+              onDeleteStockOrder={confirmStockOrderDeletion}
               onAddStockOrder={() => {
                 setEditingStockOrder(null);
                 setStockOrderModal(true);
               }}
-              onCapitalIncrease={() => {
-                setCapitalIncreaseTargetId("asset-bank");
-                setCapitalIncreaseModal(true);
-              }}
+              onCapitalIncrease={() => openCapitalDeposit("آورده نقدی جدید")}
               onLiquidityTransfer={(fromId?: string, toId?: string) => {
                 setLiquidityFromId(fromId || "asset-bank");
                 setLiquidityToId(toId || "asset-deposit-cash");
@@ -952,9 +1034,12 @@ export default function App() {
               totalValue={totalValue}
               totalProfit={totalProfit}
               segments={assetSegments}
+              capitalReport={capitalReport}
+              onResolveIssue={resolveAuditIssue}
+              onRegisterCapital={(accountId, beforeDate) => openCapitalDeposit("سرمایه اولیه", accountId, beforeDate)}
               onPdf={handlePortfolioPdf}
               onShowTransactions={() => setView("transactions")}
-              onViewAssetTransactions={(asset: Asset) => setViewingTxAsset(asset)}
+              onViewAssetTransactions={(asset: Asset, focusId?: string) => { setViewingTxFocusId(focusId); setViewingTxAsset(asset); }}
             />
           )}
 
@@ -976,7 +1061,7 @@ export default function App() {
                 setConfirmState({
                   title: "پاک‌سازی کامل و ایجاد پرتفوی جدید",
                   message:
-                    "آیا اطمینان دارید که می‌خواهید تمام داده‌های نمونه را پاک کرده و از صفر شروع کنید؟",
+                    "این کار تمام اطلاعات پرتفوی فعلی همین مرورگر را حذف می‌کند. پیش از ادامه فایل پشتیبان JSON بگیرید. آیا مطمئن هستید؟",
                   onConfirm: () => {
                     setData(emptyData());
                     notify("پرتفوی خالی آماده شد.");
@@ -1236,30 +1321,21 @@ export default function App() {
           const file = event.target.files?.[0];
           if (!file) return;
           try {
-            const text = await file.text();
-            const imported = JSON.parse(text);
-            if (Array.isArray(imported.assets)) {
-              const fullData = {
-                version: 1 as const,
-                assets: imported.assets || [],
-                transactions: imported.transactions || [],
-                prices: imported.prices || [],
-                attachments: imported.attachments || [],
-                stockOrders: imported.stockOrders || [],
-                stockPrices: imported.stockPrices || [],
-                stockDividends: imported.stockDividends || [],
-                settings: imported.settings || {
-                  seeded: true,
-                  sampleCleared: false,
-                  currency: "تومان" as const,
+            const parsed = JSON.parse(await file.text());
+            const restored = isPortfolioBackup(parsed) ? preparePortfolioData(parsed) : null;
+            if (restored) {
+              setConfirmState({
+                title: "جایگزینی پرتفوی با فایل پشتیبان",
+                message: `فایل ${file.name}: ${nf.format(restored.assets.length)} دارایی، ${nf.format(restored.transactions.length)} تراکنش و ${nf.format(restored.stockOrders.length)} سفارش بورس. این کار تمام اطلاعات فعلی همین مرورگر را جایگزین می‌کند؛ اگر به آن‌ها نیاز دارید ابتدا خروجی JSON بگیرید. معاملات مبهم به‌صورت خودکار به آورده یا سود تبدیل نمی‌شوند. فایل فقط در مرورگر خوانده می‌شود و به سرور ارسال نمی‌شود.`,
+                confirmText: "بازیابی و نمایش گزارش سرمایه",
+                confirmKind: "primary",
+                onConfirm: () => {
+                  setData(restored);
+                  setView("reports");
+                  notify("فایل پشتیبان بازیابی شد؛ موارد نیازمند بررسی را در گزارش سرمایه ببینید.");
                 },
-              };
-              const { data: migratedBackup } = migrateKianStockData(fullData);
-              setData(migratedBackup);
-              notify("اطلاعات پورتفو با موفقیت بازیابی شد.");
-            } else {
-              notify("فرمت فایل پشتیبان نامعتبر است.", "error");
-            }
+              });
+            } else notify("فرمت فایل پشتیبان نامعتبر است: فهرست دارایی‌ها، معاملات و قیمت‌ها باید موجود باشد.", "error");
           } catch {
             notify("خواندن فایل پشتیبان با خطا مواجه شد.", "error");
           }
@@ -1573,52 +1649,7 @@ export default function App() {
             setQuickTxAssetId(undefined);
           }}
           onSave={(tx, attachments) => {
-            const remainingAttachments = data.attachments.filter(
-              (att) => att.transactionId !== tx.id
-            );
-            const remainingTransactions = data.transactions.filter((t) => t.id !== tx.id);
-
-            // Handle cash transfers between accounts
-            let pairedTx: Transaction | null = null;
-            if (tx.sourceAssetId && tx.type === "buy") {
-              pairedTx = {
-                id: uid("tx-pair"),
-                assetId: tx.sourceAssetId,
-                type: "sell",
-                quantity: tx.totalPrice,
-                unitPrice: 1,
-                totalPrice: tx.totalPrice,
-                date: tx.date,
-                notes: `برداشت بابت معامله ${tx.id}`,
-                attachmentIds: [],
-                kind: "transfer",
-                createdAt: new Date().toISOString(),
-              };
-            } else if (tx.destinationAssetId && tx.type === "sell") {
-              pairedTx = {
-                id: uid("tx-pair"),
-                assetId: tx.destinationAssetId,
-                type: "buy",
-                quantity: tx.totalPrice,
-                unitPrice: 1,
-                totalPrice: tx.totalPrice,
-                date: tx.date,
-                notes: `واریز حاصل از معامله ${tx.id}`,
-                attachmentIds: [],
-                kind: "transfer",
-                createdAt: new Date().toISOString(),
-              };
-            }
-
-            const updatedTransactions = pairedTx
-              ? [...remainingTransactions, tx, pairedTx]
-              : [...remainingTransactions, tx];
-
-            setData((prev) => ({
-              ...prev,
-              transactions: updatedTransactions,
-              attachments: [...remainingAttachments, ...attachments],
-            }));
+            setData((prev) => upsertTransaction(prev, tx, attachments));
             setTxModal(false);
             setEditingTx(null);
             setQuickTxAssetId(undefined);
@@ -1632,7 +1663,9 @@ export default function App() {
         <PriceModalBulk
           assets={data.assets}
           history={data.prices}
-          onClose={() => setPriceModal(false)}
+          focusAssetId={priceFocusAssetId ?? undefined}
+          focusHistoryId={priceFocusHistoryId ?? undefined}
+          onClose={() => { setPriceModal(false); setPriceFocusAssetId(null); setPriceFocusHistoryId(null); }}
           onSave={(updates, date) => {
             const newHistory: PriceHistory[] = updates.map((u) => ({
               id: uid("price"),
@@ -1640,27 +1673,72 @@ export default function App() {
               price: u.price,
               date,
             }));
-            const updatedAssets = data.assets.map((asset) => {
-              const u = updates.find((item) => item.assetId === asset.id);
-              return u ? { ...asset, currentPrice: u.price } : asset;
+            setData((prev) => {
+              // Replace an existing quote for the same day instead of leaving two
+              // equally dated prices where the older one may win the valuation.
+              const prices = [
+                ...prev.prices.filter((price) => !(price.date === date && updates.some((u) => u.assetId === price.assetId))),
+                ...newHistory,
+              ];
+              return {
+                ...prev,
+                prices,
+                assets: prev.assets.map((asset) => {
+                  if (!updates.some((item) => item.assetId === asset.id)) return asset;
+                  const latest = prices.filter((item) => item.assetId === asset.id && validIsoDate(item.date) && item.date <= todayIso() && Number.isFinite(item.price) && item.price > 0)
+                    .sort((a, b) => b.date.localeCompare(a.date))[0];
+                  return latest ? { ...asset, currentPrice: latest.price } : asset;
+                }),
+              };
             });
-
-            setData((prev) => ({
-              ...prev,
-              assets: updatedAssets,
-              prices: [...prev.prices, ...newHistory],
-            }));
             notify("قیمت‌های جدید با موفقیت ثبت شدند.");
           }}
           onEditHistory={(id, price, date) => {
-            setData((prev) => ({
-              ...prev,
-              prices: prev.prices.map((item) =>
-                item.id === id ? { ...item, price, date } : item
-              ),
-            }));
+            setData((prev) => {
+              const changed = prev.prices.find((item) => item.id === id);
+              const prices = prev.prices.map((item) => item.id === id ? { ...item, price, date } : item);
+              const latest = prices.filter((item) => item.assetId === changed?.assetId && validIsoDate(item.date) && item.date <= todayIso() && Number.isFinite(item.price) && item.price > 0)
+                .sort((a, b) => b.date.localeCompare(a.date))[0];
+              return {
+                ...prev,
+                prices,
+                assets: prev.assets.map((asset) => {
+                  if (asset.id !== changed?.assetId || !latest ||
+                      (assetMode(asset) === "copy" && asset.lastValuationAt && latest.date < asset.lastValuationAt)) return asset;
+                  return assetMode(asset) === "copy"
+                    ? { ...asset, currentPrice: latest.price, copyUsdRate: latest.price }
+                    : { ...asset, currentPrice: latest.price };
+                }),
+              };
+            });
             notify("رکورد قیمت اصلاح شد.");
           }}
+        />
+      )}
+
+      {/* Edit the exact stock quote flagged by the capital audit, without rewriting other days. */}
+      {stockPriceModal && (
+        <StockPriceHistoryModal
+          history={data.stockPrices}
+          focusId={stockPriceFocusId ?? undefined}
+          onClose={() => { setStockPriceModal(false); setStockPriceFocusId(null); }}
+          onSave={(edited) => {
+            setData((prev) => ({
+              ...prev,
+              stockPrices: prev.stockPrices.map((price) => price.id === edited.id ? edited : price),
+            }));
+            notify("رکورد نرخ پایانی سهام اصلاح شد.");
+          }}
+          onDelete={(price) => setConfirmState({
+            title: "حذف رکورد قیمت سهام",
+            message: `قیمت ${price.symbol} در تاریخ ${toPersianDate(price.date)} پس از حذف از تاریخچه پاک می‌شود. ابتدا با سند یا نسخهٔ پشتیبان مطابقت دهید. آیا مطمئن هستید؟`,
+            onConfirm: () => {
+              setData((prev) => ({ ...prev, stockPrices: prev.stockPrices.filter((item) => item.id !== price.id) }));
+              setStockPriceModal(false);
+              setStockPriceFocusId(null);
+              notify("رکورد نرخ سهام حذف شد؛ ارزش روز و هشدارها بازبینی شدند.");
+            },
+          })}
         />
       )}
 
@@ -1754,9 +1832,14 @@ export default function App() {
                       copyUsdBalance: usdBalance,
                       copyUsdRate: usdRate ?? a.copyUsdRate,
                       currentPrice: usdRate ?? a.currentPrice,
+                      lastValuationAt: todayIso(),
                     }
                   : a
               ),
+              prices: usdRate && usdRate > 0 ? [
+                ...prev.prices.filter((p) => !(p.assetId === copyModalAsset.id && p.date === todayIso())),
+                { id: uid("copy-rate"), assetId: copyModalAsset.id, price: usdRate, date: todayIso() },
+              ] : prev.prices,
             }));
             notify(`مانده حساب ${copyModalAsset.name} به‌روزرسانی شد.`);
           }}
@@ -1768,9 +1851,11 @@ export default function App() {
       {viewingTxAsset && (
         <AssetTransactionsModal
           asset={viewingTxAsset}
+          data={data}
           transactions={data.transactions}
           stockOrders={data.stockOrders}
-          onClose={() => setViewingTxAsset(null)}
+          focusTransactionId={viewingTxFocusId}
+          onClose={() => { setViewingTxAsset(null); setViewingTxFocusId(undefined); }}
           onAddTx={() => {
             const currentAsset = viewingTxAsset;
             setViewingTxAsset(null);
@@ -1780,50 +1865,15 @@ export default function App() {
           }}
           onEditTx={(tx: Transaction) => {
             setViewingTxAsset(null);
-            setEditingTx(tx);
-            setQuickTxAssetId(undefined);
-            setTxModal(true);
+            openTransactionForEdit(tx);
           }}
-          onDeleteTx={(tx: Transaction) => {
-            setConfirmState({
-              title: "حذف معامله",
-              message: `آیا از حذف این معامله به مبلغ ${money(tx.totalPrice)} اطمینان دارید؟`,
-              onConfirm: () => {
-                const attachmentSet = new Set(tx.attachmentIds);
-                const relatedCashId = `deposit-trade:${tx.id}`;
-                setData((prev) => ({
-                  ...prev,
-                  transactions: prev.transactions.filter(
-                    (item) => item.id !== tx.id && !item.notes?.includes(relatedCashId)
-                  ),
-                  attachments: prev.attachments.filter((item) => !attachmentSet.has(item.id)),
-                }));
-                notify("معامله با موفقیت حذف شد.");
-              },
-            });
-          }}
+          onDeleteTx={confirmTransactionDeletion}
           onEditOrder={(order: StockOrder) => {
             setViewingTxAsset(null);
             setEditingStockOrder(order);
             setStockOrderModal(true);
           }}
-          onDeleteOrder={(id: string) => {
-            const target = data.stockOrders?.find((o) => o.id === id);
-            setConfirmState({
-              title: "حذف معامله بورس",
-              message: `آیا از حذف معامله ${target?.symbol || "بورس"} به مبلغ ${money(target?.totalPrice || 0)} اطمینان دارید؟ تسویه صندوق حامی اصلاح خواهد شد.`,
-              onConfirm: () => {
-                const remainingOrders = (data.stockOrders || []).filter((o) => o.id !== id);
-                const updatedTxs = syncStockCashTransfers(data.transactions, remainingOrders, data.assets);
-                setData((prev) => ({
-                  ...prev,
-                  stockOrders: remainingOrders,
-                  transactions: updatedTxs,
-                }));
-                notify("معامله بورس حذف شد و مانده تسویه حامی اصلاح گردید.");
-              },
-            });
-          }}
+          onDeleteOrder={confirmStockOrderDeletion}
           onAddOrder={() => {
             setViewingTxAsset(null);
             setEditingStockOrder(null);
@@ -1837,6 +1887,7 @@ export default function App() {
         <StockOrderModal
           order={editingStockOrder}
           existingSymbols={Array.from(new Set((data.stockOrders || []).map((o) => o.symbol)))}
+          cashAccounts={data.assets.filter((asset) => isCashAccount(asset))}
           onClose={() => {
             setStockOrderModal(false);
             setEditingStockOrder(null);
@@ -1866,13 +1917,31 @@ export default function App() {
         />
       )}
 
+      {/* Open the exact problematic dividend from the reconciliation panel. */}
+      {auditDividend && (
+        <StockDividendModal
+          key={auditDividend.id}
+          symbol={auditDividend.symbol}
+          initialDividend={auditDividend}
+          dividends={data.stockDividends}
+          symbols={Array.from(new Set(data.stockOrders.map((order) => order.symbol)))}
+          onClose={() => setAuditDividendId(null)}
+          onSave={saveDividend}
+          onToggleStatus={toggleDividend}
+          onDelete={deleteDividend}
+          onShowTransactions={() => { setAuditDividendId(null); setView("transactions"); }}
+        />
+      )}
+
       {/* Capital Increase Modal */}
       {capitalIncreaseModal && (
         <CapitalIncreaseModal
           assets={data.assets}
           targetAssetId={capitalIncreaseTargetId}
+          initialSource={capitalIncreaseSource}
+          beforeDate={capitalIncreaseBeforeDate}
           onClose={() => setCapitalIncreaseModal(false)}
-          onSave={(amount: number, date: string, source: string, note: string, targetAssetId: string) => {
+          onSave={(amount: number, date: string, source: string, note: string, targetAssetId: string, initial: boolean) => {
             const target = data.assets.find((a) => a.id === targetAssetId);
             const targetName = target?.name || "بانک";
             const tx: Transaction = {
@@ -1883,7 +1952,7 @@ export default function App() {
               quantity: amount,
               unitPrice: 1,
               totalPrice: amount,
-              kind: "balance_adjustment",
+              kind: initial ? "opening_capital" : "capital_in",
               notes: `افزایش سرمایه و آورده نقدی [منبع: ${source}]${note ? ` - ${note}` : ""}`,
               attachmentIds: [],
               createdAt: new Date().toISOString(),
@@ -1911,9 +1980,12 @@ export default function App() {
             const toAsset = data.assets.find((a) => a.id === toAssetId);
             const fromName = fromAsset?.name || "حساب مبدأ";
             const toName = toAsset?.name || "حساب مقصد";
+            const withdrawId = uid("tx-transfer-out");
+            const depositId = uid("tx-transfer-in");
 
             const txWithdraw: Transaction = {
-              id: uid("tx-transfer-out"),
+              id: withdrawId,
+              linkedTransactionId: depositId,
               assetId: fromAssetId,
               date,
               type: "sell",
@@ -1927,7 +1999,8 @@ export default function App() {
             };
 
             const txDeposit: Transaction = {
-              id: uid("tx-transfer-in"),
+              id: depositId,
+              linkedTransactionId: withdrawId,
               assetId: toAssetId,
               date,
               type: "buy",
@@ -1955,6 +2028,8 @@ export default function App() {
         <ConfirmModal
           title={confirmState.title}
           message={confirmState.message}
+          confirmText={confirmState.confirmText}
+          confirmKind={confirmState.confirmKind}
           onConfirm={confirmState.onConfirm}
           onClose={() => setConfirmState(null)}
         />

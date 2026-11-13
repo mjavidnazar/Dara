@@ -2,6 +2,8 @@ import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 import type { Asset, AssetMetric, PortfolioData, Transaction } from "./types";
 import { money, percent, nf, toPersianDate, todayIso, safeNumber } from "./portfolio";
+import { analyzeCapital } from "./capitalReport";
+import { describeTransactionNote } from "./transactionDescriptions";
 import { VAZIRMATN_PDF_CSS } from "./pdfFonts";
 
 const CATEGORY_NAMES: Record<string, string> = {
@@ -25,6 +27,12 @@ const CATEGORY_COLORS: Record<string, { bg: string; text: string }> = {
 /** Format clean integer number with Persian locale */
 function fmt(value: number): string {
   return nf.format(Math.round(safeNumber(value)));
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character] || character);
 }
 
 /** Format signed money string with Persian digits */
@@ -200,9 +208,24 @@ export async function exportPortfolioPdf(
 ): Promise<boolean> {
   const dateStr = toPersianDate(todayIso());
   const totalCostBasis = metrics.reduce((sum, m) => sum + safeNumber(m.costBasis), 0);
-  const totalFreshCapital = metrics.reduce((sum, m) => sum + safeNumber(m.freshCapital), 0);
+  const positiveAllocation = metrics.reduce((sum, m) => sum + Math.max(0, safeNumber(m.marketValue)), 0);
   const totalRoi = totalCostBasis > 0 ? (totalProfit / totalCostBasis) * 100 : 0;
-  const totalCapitalRoi = totalFreshCapital > 0 ? (totalProfit / totalFreshCapital) * 100 : 0;
+  const capitalReport = analyzeCapital(data, totalValue, totalProfit);
+  const confirmedDeposits = (capitalReport.initialCapital ?? 0) + capitalReport.additionalCapital;
+  const confirmedRoi = capitalReport.isReliable && confirmedDeposits > 0
+    ? (capitalReport.estimatedProfit / confirmedDeposits) * 100 : null;
+  const capitalFlowsHtml = capitalReport.flows.slice(0, 50).map((flow) => {
+    const kind = {
+      initial: "سرمایهٔ اولیه", deposit: "آوردهٔ بعدی", withdrawal: "برداشت بیرونی",
+      possibleDeposit: "خرید بی‌منبع (فرضی)", possibleWithdrawal: "فروش بی‌مقصد (فرضی)",
+    }[flow.kind];
+    return `<tr style="border-bottom: 1px solid #e2e8f0;">
+      <td style="padding: 5px 8px;">${toPersianDate(flow.date)}</td>
+      <td style="padding: 5px 8px;">${escapeHtml(flow.label)}</td>
+      <td style="padding: 5px 8px;">${kind}</td>
+      <td style="padding: 5px 8px; text-align: left;">${money(flow.amount)}</td>
+    </tr>`;
+  }).join("");
   const distinctCategories = new Set(metrics.map((m) => m.asset.category)).size;
 
   const totalProfitFmt = fmtSigned(totalProfit);
@@ -214,7 +237,8 @@ export async function exportPortfolioPdf(
       const catName = CATEGORY_NAMES[catKey] || catKey;
       const catColor = CATEGORY_COLORS[catKey] || { bg: "#f1f5f9", text: "#334155" };
       const profitMeta = fmtSigned(item.totalProfit);
-      const sharePct = totalValue > 0 ? (item.marketValue / totalValue) * 100 : 0;
+      const sharePct = positiveAllocation > 0 && item.marketValue > 0
+        ? (item.marketValue / positiveAllocation) * 100 : 0;
       const rowBg = idx % 2 === 0 ? "#ffffff" : "#fbfcfd";
 
       return `
@@ -239,7 +263,7 @@ export async function exportPortfolioPdf(
           <!-- 4. Cost Basis & Fresh Capital -->
           <td style="padding: 10px 14px; color: #334155; width: 16%; font-weight: 600; font-size: 11px; text-align: left; direction: ltr;">
             <div>${fmt(item.costBasis)}</div>
-            <div style="font-size: 9.5px; color: #0284c7; margin-top: 2px;">آورده اولیه: ${fmt(item.freshCapital)}</div>
+            <div style="font-size: 9.5px; color: #0284c7; margin-top: 2px;">بیشترین سرمایهٔ درگیر: ${fmt(item.freshCapital)}</div>
           </td>
 
           <!-- 5. Market Value (Toman) -->
@@ -265,7 +289,7 @@ export async function exportPortfolioPdf(
               </span>
             </div>
             <div style="font-size: 9.5px; color: #64748b; margin-top: 2px; text-align: left; direction: rtl;">
-              بازده روی آورده: <b style="color: ${item.capitalRoi >= 0 ? "#059669" : "#dc2626"}; direction: ltr; display: inline-block;">${percent(item.capitalRoi)}</b>
+              نسبت سود به سرمایهٔ درگیر: <b style="color: ${item.capitalRoi >= 0 ? "#059669" : "#dc2626"}; direction: ltr; display: inline-block;">${percent(item.capitalRoi)}</b>
               ${item.isRiskFree ? `<span style="background: #fef3c7; color: #92400e; padding: 1px 4px; border-radius: 3px; font-size: 9px; margin-right: 4px;">ریسک‌فری</span>` : ""}
             </div>
           </td>
@@ -402,16 +426,16 @@ export async function exportPortfolioPdf(
           </div>
           <div style="font-size: 10.5px; display: flex; gap: 6px;">
             <span style="font-weight: 700; color: ${totalProfitFmt.color}; background: ${totalProfitFmt.bg}; padding: 2px 7px; border-radius: 4px; display: inline-block;">
-              بازده روی آورده: ${percent(totalCapitalRoi)}
+              ${confirmedRoi === null ? "سود موقت؛ بررسی صحت در ادامهٔ گزارش" : `بازده ساده روی آوردهٔ ثبت‌شده: ${percent(confirmedRoi)}`}
             </span>
           </div>
         </div>
 
         <!-- KPI 3: Fresh Capital & Cost Basis -->
         <div style="background: #ffffff; border: 1px solid #e2e8f0; border-top: 3.5px solid #0284c7; border-radius: 12px; padding: 14px 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
-          <div style="font-size: 11px; color: #64748b; font-weight: 600; margin-bottom: 6px;">آورده واقعی از جیب (بدون گردش مجدد)</div>
-          <div style="font-size: 18px; font-weight: 900; color: #0284c7; margin-bottom: 4px; direction: ltr; text-align: right;">${money(totalFreshCapital)}</div>
-          <div style="font-size: 10px; color: #64748b;">بهای تمام‌شده موجودی فعلی: <b style="color: #0f172a;">${money(totalCostBasis)}</b></div>
+          <div style="font-size: 11px; color: #64748b; font-weight: 600; margin-bottom: 6px;">سرمایه اولیهٔ مشخص‌شده</div>
+          <div style="font-size: 18px; font-weight: 900; color: #0284c7; margin-bottom: 4px; direction: ltr; text-align: right;">${capitalReport.initialCapital === null ? "نامشخص" : money(capitalReport.initialCapital)}</div>
+          <div style="font-size: 10px; color: #64748b;">بهای تمام‌شده موجودی فعلی (متفاوت از آورده): <b style="color: #0f172a;">${money(totalCostBasis)}</b></div>
         </div>
 
         <!-- KPI 4: Diversification -->
@@ -420,6 +444,32 @@ export async function exportPortfolioPdf(
           <div style="font-size: 18px; font-weight: 900; color: #0284c7; margin-bottom: 4px;">${nf.format(metrics.length)} قلم دارایی</div>
           <div style="font-size: 10px; color: #94a3b8;">در ${nf.format(distinctCategories)} دسته‌بندی مالی مختلف</div>
         </div>
+      </div>
+
+      <!-- Capital reconciliation: keep uncertainty visible in downloaded reports too -->
+      <div style="margin-bottom: 24px; padding: 16px; border: 1px solid ${capitalReport.isReliable ? "#99f6e4" : "#fcd34d"}; border-radius: 12px; background: ${capitalReport.isReliable ? "#f0fdfa" : "#fffbeb"};">
+        <b style="font-size: 14px; color: #0f172a;">سرمایه، ورود و خروج وجه و کنترل صحت</b>
+        <span style="font-size: 11px; margin-right: 12px; color: ${capitalReport.isReliable ? "#047857" : "#b45309"};">${capitalReport.isReliable ? "تراز تطبیق دارد" : `${nf.format(capitalReport.issues.length)} مورد نیازمند بررسی · نتیجه موقت است`}</span>
+        <div style="display: flex; justify-content: space-between; gap: 14px; margin-top: 12px; font-size: 11px;">
+          <span>سرمایهٔ اولیه: <b>${capitalReport.initialCapital === null ? "نامشخص" : money(capitalReport.initialCapital)}</b></span>
+          <span>آوردهٔ بعدی: <b>${money(capitalReport.additionalCapital)}</b></span>
+          <span>برداشت بیرونی: <b>${money(capitalReport.withdrawals)}</b></span>
+          <span>خالص آوردهٔ مشخص${capitalReport.initialCapital === null ? " (بدون اولیهٔ نامشخص)" : ""}: <b>${money(capitalReport.netCapital)}</b></span>
+        </div>
+        <div style="display: flex; justify-content: space-between; gap: 14px; margin-top: 10px; font-size: 11px;">
+          <span>خریدهای بی‌منبع: <b>${money(capitalReport.possibleDeposits)}</b></span>
+          <span>فروش‌های بی‌مقصد: <b>${money(capitalReport.possibleWithdrawals)}</b></span>
+          <span>سود برآوردی از تراز: <b>${money(capitalReport.estimatedProfit)}</b></span>
+          <span>اختلاف با سود دارایی‌ها: <b>${money(Math.abs(capitalReport.profitGap))}</b></span>
+        </div>
+        <p style="font-size: 10px; color: #64748b; line-height: 1.8; margin: 10px 0 0;">سود برآوردی = ارزش فعلی − خالص آورده (شامل خرید/فروش بی‌منبع به‌صورت فرضی) + مطالبات مجمع در انتظار (${money(capitalReport.pendingDividends)}) + سود مجمعِ بی‌واریزِ پیوندخورده (${money(capitalReport.paidOutside)}؛ اگر محل دریافت تأیید نشده، موقتاً خارج از سبد فرض شده است). ${capitalReport.isReliable ? "کنترل‌های داخلی با سوابق ثبت‌شده سازگارند؛ این رقم بازده زمانی (IRR) نیست و بدون تطبیق با صورت‌حساب‌ها سود تأییدشده محسوب نمی‌شود." : `${capitalReport.initialCapital === null ? "سرمایهٔ اولیه هنوز مشخص نشده است. " : ""}تا رفع موارد زیر، ارقام قطعی نیستند.`}</p>
+        ${capitalReport.issues.slice(0, 10).map((issue) => `<div style="font-size: 10px; color: #92400e; margin-top: 5px;">• ${escapeHtml(issue.title)} — ${escapeHtml(issue.detail)}</div>`).join("")}
+        ${capitalReport.issues.length > 10 ? `<div style="font-size: 10px; color: #92400e; margin-top: 7px;">${nf.format(capitalReport.issues.length - 10)} مورد دیگر در صفحهٔ گزارش‌های اپ قابل مشاهده و اصلاح است.</div>` : ""}
+        ${capitalFlowsHtml ? `<div style="margin-top: 13px; font-size: 10px; font-weight: 700;">ردیابی پول از ابتدا (ردیف‌های فرضی جدا مشخص شده‌اند)</div>
+          <table style="width: 100%; border-collapse: collapse; margin-top: 5px; font-size: 9.5px;">
+            <thead><tr style="background: #f1f5f9;"><th style="padding: 5px 8px; text-align: right;">تاریخ</th><th style="padding: 5px 8px; text-align: right;">دارایی</th><th style="padding: 5px 8px; text-align: right;">ماهیت</th><th style="padding: 5px 8px; text-align: left;">مبلغ</th></tr></thead>
+            <tbody>${capitalFlowsHtml}</tbody>
+          </table>${capitalReport.flows.length > 50 ? `<small>${nf.format(capitalReport.flows.length - 50)} ردیف دیگر در گزارش داخل برنامه دیده می‌شود.</small>` : ""}` : ""}
       </div>
 
       <!-- Asset Performance Table -->
@@ -458,12 +508,12 @@ export async function exportPortfolioPdf(
                 ${fmt(totalValue)}
               </td>
               <td style="padding: 12px 14px; text-align: center; font-size: 11px; color: #0f172a;">
-                ۱۰۰٪
+                ${positiveAllocation > 0 ? "۱۰۰٪ اقلام مثبت" : "—"}
               </td>
               <td style="padding: 12px 14px; text-align: left;">
                 <div style="display: flex; align-items: center; justify-content: flex-end; gap: 6px;">
                   <span style="display: inline-block; font-size: 10px; font-weight: 700; color: ${totalProfitFmt.color}; background: ${totalProfitFmt.bg}; padding: 2px 6px; border-radius: 4px;">
-                    ${percent(totalRoi)}
+                    نسبت سود به بهای تمام‌شده: ${percent(totalRoi)}
                   </span>
                   <span style="color: ${totalProfitFmt.color}; font-size: 12px; direction: ltr; font-weight: 800;">
                     ${totalProfitFmt.text}
@@ -549,6 +599,7 @@ export async function exportAssetCardPdf(
   sellTxs: Transaction[],
   avgBuyPrice: number,
   currentPrice: number,
+  data: Pick<PortfolioData, "assets" | "transactions" | "stockOrders">,
   totalDividend: number = 0
 ): Promise<boolean> {
   const dateStr = toPersianDate(todayIso());
@@ -607,8 +658,8 @@ export async function exportAssetCardPdf(
                 <td style="padding: 9px 12px; color: #0f172a; font-weight: 700; width: 20%; font-size: 12px; text-align: left; direction: ltr;">
                   ${fmt(tx.totalPrice)}
                 </td>
-                <td style="padding: 9px 12px; color: #475569; width: 16%; font-size: 10.5px;">
-                  ${tx.notes || "—"}
+                <td style="padding: 9px 12px; color: #475569; width: 16%; font-size: 10.5px; white-space: pre-line;">
+                  ${escapeHtml(describeTransactionNote(data, tx) || "—")}
                 </td>
               </tr>
             `;
@@ -657,7 +708,7 @@ export async function exportAssetCardPdf(
         </div>
 
         <div style="background: #ffffff; border: 1px solid #e2e8f0; border-top: 3.5px solid #0284c7; border-radius: 12px; padding: 13px 15px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
-          <div style="font-size: 11px; color: #64748b; font-weight: 600; margin-bottom: 5px;">آورده واقعی از جیب (بدون گردش مجدد)</div>
+          <div style="font-size: 11px; color: #64748b; font-weight: 600; margin-bottom: 5px;">بیشترین سرمایهٔ درگیر این دارایی</div>
           <div style="font-size: 18px; font-weight: 900; color: #0284c7; margin-bottom: 3px; direction: ltr; text-align: right;">${money(item.freshCapital)}</div>
           <div style="font-size: 10.5px; color: #64748b;">بهای تمام‌شده موجودی فعلی: <b style="color: #0f172a;">${money(item.costBasis)}</b></div>
         </div>
@@ -669,7 +720,7 @@ export async function exportAssetCardPdf(
           </div>
           <div style="font-size: 10.5px; display: flex; align-items: center; gap: 5px;">
             <span style="font-weight: 700; color: ${profitMeta.color}; background: ${profitMeta.bg}; padding: 2px 7px; border-radius: 4px; display: inline-block;">
-              بازده روی آورده: ${percent(item.capitalRoi)}
+              نسبت سود به سرمایهٔ درگیر: ${percent(item.capitalRoi)}
             </span>
             ${item.isRiskFree ? `<span style="font-size: 9.5px; font-weight: 800; background: #fef3c7; color: #92400e; padding: 2px 5px; border-radius: 4px;">ریسک‌فری</span>` : ""}
           </div>
@@ -776,13 +827,13 @@ export async function exportAssetCardPdf(
         <!-- Pillar 4: Capital Flow & Fresh Capital Balance -->
         <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,0.02);">
           <div style="background: #fffbeb; border-bottom: 1px solid #fde68a; padding: 10px 16px; font-size: 12px; font-weight: 800; color: #92400e; display: flex; justify-content: space-between; align-items: center;">
-            <span>⚖️ ۴. تراز سرمایه و آورده واقعی (بدون گردش مجدد)</span>
+            <span>⚖️ ۴. تراز معاملات و سرمایهٔ درگیر این دارایی</span>
             ${item.isRiskFree ? `<span style="font-size: 10px; background: #fef3c7; color: #b45309; padding: 2px 7px; border-radius: 4px; font-weight: 800; border: 1px solid #fcd34d;">🛡️ پوزیشن بدون ریسک</span>` : ""}
           </div>
           <div style="padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; font-size: 11.5px;">
             <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed #f1f5f9; padding-bottom: 6px;">
               <div>
-                <span style="color: #64748b; display: block;">آورده اولیه واقعی از جیب:</span>
+                <span style="color: #64748b; display: block;">بیشترین سرمایهٔ درگیر در دارایی:</span>
                 <span style="font-size: 9.5px; color: #94a3b8;">حداکثر سرمایه درگیر (بدون احتساب گردش مجدد فروش‌ها)</span>
               </div>
               <b style="color: #0284c7; font-size: 12px; direction: ltr;">${money(item.freshCapital)}</b>
@@ -805,7 +856,7 @@ export async function exportAssetCardPdf(
               <b style="color: #0f172a; direction: ltr;">${money(totalOutflow)}</b>
             </div>
             <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed #f1f5f9; padding-bottom: 6px;">
-              <span style="color: #64748b;">سود کل به نسبت آورده واقعی:</span>
+              <span style="color: #64748b;">سود کل به نسبت سرمایهٔ درگیر:</span>
               <b style="color: ${profitMeta.color}; font-size: 12px; direction: ltr;">
                 ${profitMeta.text} تومان (${percent(item.capitalRoi)})
               </b>
@@ -813,7 +864,7 @@ export async function exportAssetCardPdf(
             <div style="display: flex; justify-content: space-between; align-items: center;">
               <span style="color: #64748b;">وضعیت ریسک اصل سرمایه:</span>
               <span style="padding: 2px 8px; border-radius: 5px; font-weight: 800; font-size: 10.5px; background: ${item.isRiskFree ? "#ecfdf5" : netReturnMeta.bg}; color: ${item.isRiskFree ? "#047857" : netReturnMeta.color};">
-                ${item.isRiskFree ? "اصل سرمایه اولیه کاملاً نقد شده (ریسک صفر)" : netReturn > 0 ? "سودده و افزایشی" : netReturn < 0 ? "زیان‌ده" : "سربه‌سر"}
+                ${item.isRiskFree ? "فروش‌ها هزینهٔ خرید این دارایی را پوشش داده‌اند" : netReturn > 0 ? "سودده و افزایشی" : netReturn < 0 ? "زیان‌ده" : "سربه‌سر"}
               </span>
             </div>
           </div>

@@ -59,12 +59,14 @@ export function DonutChart({
   segments: Array<{ label: string; value: number; color: string }>;
   total: number;
 }) {
+  // Negative cash is included in net equity, but not a slice of a positive allocation chart.
+  const positiveTotal = segments.filter((item) => item.value > 0).reduce((sum, item) => sum + item.value, 0);
   const gradient = segments
     .filter((item) => item.value > 0)
     .reduce<{ parts: string[]; cursor: number }>(
       (acc, item) => {
         const start = acc.cursor;
-        const end = start + (total ? (item.value / total) * 100 : 0);
+        const end = start + (positiveTotal ? (item.value / positiveTotal) * 100 : 0);
         return {
           parts: [...acc.parts, `${item.color} ${start}% ${end}%`],
           cursor: end,
@@ -77,7 +79,7 @@ export function DonutChart({
     <div className="donut-layout">
       <div className="donut" style={{ background: gradient ? `conic-gradient(${gradient})` : "#e5e7eb" }}>
         <div className="donut-hole">
-          <span>ارزش کل</span>
+          <span>{total < positiveTotal - 1 ? "خالص پس از کسری" : "ارزش کل"}</span>
           <strong>{money(total).replace(" تومان", "")}</strong>
           <small>تومان</small>
         </div>
@@ -87,7 +89,7 @@ export function DonutChart({
           <div className="legend-row" key={item.label}>
             <span className="legend-dot" style={{ background: item.color }} />
             <span>{item.label}</span>
-            <b>{total ? `${((item.value / total) * 100).toFixed(1)}٪` : "۰٪"}</b>
+            <b>{positiveTotal ? `${((item.value / positiveTotal) * 100).toFixed(1)}٪` : "۰٪"}</b>
           </div>
         ))}
       </div>

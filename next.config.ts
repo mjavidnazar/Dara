@@ -7,6 +7,7 @@ const nextConfig: NextConfig = {
     "*.europe-west2.run.app",
     "*.run.app",
     "*.aistudio.google.com",
+    "*.e2b.app",
     "localhost:3000",
   ],
 };

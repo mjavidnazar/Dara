@@ -55,14 +55,31 @@ export function persianDatePart(value: number, width = 1) {
 
 export function toPersianDate(iso: string) {
   if (!iso) return "—";
+  if (!validIsoDate(iso)) return iso;
   const date = new Date(`${iso}T12:00:00`);
-  if (Number.isNaN(date.getTime())) return iso;
   const j = toJalaali(date);
   return `${persianDatePart(j.jy)}/${persianDatePart(j.jm, 2)}/${persianDatePart(j.jd, 2)}`;
 }
 
 export function todayIso() {
   return new Date().toISOString().slice(0, 10);
+}
+
+export function validIsoDate(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T12:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+export function hasValidTradeAmounts(row: Pick<Transaction, "quantity" | "unitPrice" | "totalPrice">): boolean {
+  return Number.isFinite(row.quantity) && row.quantity > 0 &&
+    Number.isFinite(row.unitPrice) && row.unitPrice > 0 &&
+    Number.isFinite(row.totalPrice) && row.totalPrice > 0;
+}
+
+export function hasValidStockOrder(order: StockOrder): boolean {
+  return Boolean(normalizeSymbol(order.symbol)) && hasValidTradeAmounts(order) &&
+    (order.commission === undefined || (Number.isFinite(order.commission) && order.commission >= 0));
 }
 
 export function uid(prefix = "id") {
@@ -81,7 +98,9 @@ export function assetMode(asset?: Asset) {
   const name = String(asset?.name ?? "")
     .replaceAll("ي", "ی")
     .toLowerCase();
+  const category = String(asset?.category ?? "");
   if (
+    category === "نقد" || category === "دفتر نقدینگی" ||
     name.includes("حامی") ||
     name.includes("کیان") ||
     name.includes("بانک") ||
@@ -91,13 +110,13 @@ export function assetMode(asset?: Asset) {
   ) {
     return "cash" as const;
   }
-  if (name.includes("کپی") || name.includes("copy")) {
+  if (category === "کپی ترید" || name.includes("کپی") || name.includes("copy")) {
     return "copy" as const;
   }
-  if (name.includes("صندوق") && (name.includes("درآمد") || name.includes("ثابت"))) {
+  if (category === "صندوق درآمد ثابت" || (name.includes("صندوق") && (name.includes("درآمد") || name.includes("ثابت")))) {
     return "fixed" as const;
   }
-  if (name.includes("بورس") || name.includes("سهام") || name.includes("stock")) {
+  if (category === "بورس" || name.includes("بورس") || name.includes("سهام") || name.includes("stock")) {
     return "stock" as const;
   }
   return "standard" as const;
@@ -130,11 +149,24 @@ export function isDepositCertificate(asset?: Asset): boolean {
   );
 }
 
+export function isInterestTransaction(tx: Pick<Transaction, "type" | "kind" | "notes">) {
+  if (tx.kind) return tx.kind === "interest";
+  // Legacy imports had no kind. Only recognizable interest deposits retain the old treatment;
+  // the word «سود» in the source of a capital deposit must never turn capital into profit.
+  return tx.type === "buy" && /^(?:بابت\s+)?(?:واریز\s+)?سود(?:\s|$)|^بابت سود/.test(tx.notes?.trim() || "");
+}
+
 export function transactionLabel(tx: Pick<Transaction, "type" | "kind" | "notes">, asset?: Asset) {
   if (!isCashAccount(asset)) return tx.type === "buy" ? "خرید" : "فروش";
-  if (tx.kind === "interest" || tx.notes?.includes("سود")) return "سود واریزی";
-  if (tx.kind === "balance_adjustment" || tx.notes?.includes("اصلاح مانده")) return "اصلاح مانده";
-  return tx.type === "buy" ? "واریز" : "برداشت";
+  if (tx.kind === "opening_capital") return "سرمایه اولیه";
+  if (tx.kind === "capital_in") return "آورده جدید";
+  if (tx.kind === "capital_out") return "برداشت از سبد";
+  if (isInterestTransaction(tx)) return "سود واریزی";
+  if (tx.kind === "stock_dividend") return "دریافت سود مجمع";
+  if (tx.kind === "balance_adjustment" || (!tx.kind && tx.notes?.includes("اصلاح مانده"))) return "اصلاح مانده";
+  if (tx.kind === "fee") return "هزینه / کارمزد";
+  if (tx.kind === "transfer") return "انتقال داخلی";
+  return tx.type === "buy" ? "واریز (تعیین‌نشده)" : "برداشت (تعیین‌نشده)";
 }
 
 export function metricsAt(
@@ -143,6 +175,7 @@ export function metricsAt(
   prices: PriceHistory[] = [],
   until?: string,
 ): AssetMetric[] {
+  const asOf = until ?? todayIso();
   return assets.map((asset) => {
     const mode = assetMode(asset);
     let quantity = 0;
@@ -155,7 +188,7 @@ export function metricsAt(
     let totalBuyQty = 0;
 
     const list = transactions
-      .filter((t) => t.assetId === asset.id && (!until || t.date <= until))
+      .filter((t) => t.assetId === asset.id && validIsoDate(t.date) && t.date <= asOf && hasValidTradeAmounts(t))
       .sort((a, b) => (a.date || "").localeCompare(b.date || "") || (a.createdAt || "").localeCompare(b.createdAt || ""));
 
     for (const tx of list) {
@@ -182,7 +215,7 @@ export function metricsAt(
     }
 
     const historicalPrice = prices
-      .filter((p) => p.assetId === asset.id && (!until || p.date <= until))
+      .filter((p) => p.assetId === asset.id && validIsoDate(p.date) && p.date <= asOf && Number.isFinite(p.price) && p.price > 0)
       .sort((a, b) => (b.date || "").localeCompare(a.date || ""))[0]?.price;
     const currentPrice = safeNumber(historicalPrice ?? asset.currentPrice);
 
@@ -197,8 +230,17 @@ export function metricsAt(
     let displayQuantity = Math.max(0, quantity);
 
     if (mode === "copy") {
-      const copyUsd = safeNumber(asset.copyUsdBalance ?? quantity);
-      const copyRate = safeNumber(asset.copyUsdRate ?? currentPrice);
+      // The single current USD balance is not a historical series. Before its
+      // recorded valuation date, approximate holdings from dated USD movements;
+      // never place today's snapshot into a date before the first deposit.
+      const useSnapshot = (!asset.lastValuationAt || (validIsoDate(asset.lastValuationAt) && asset.lastValuationAt <= asOf)) &&
+        (!until || until >= todayIso() || Boolean(asset.lastValuationAt && until >= asset.lastValuationAt));
+      const copyUsd = useSnapshot
+        ? safeNumber(asset.copyUsdBalance ?? quantity)
+        : Math.max(0, quantity);
+      const copyRate = useSnapshot
+        ? safeNumber(asset.copyUsdRate ?? currentPrice)
+        : safeNumber(historicalPrice ?? list[list.length - 1]?.unitPrice);
       displayQuantity = copyUsd;
       marketValue = copyUsd * copyRate;
       totalProfit = marketValue - Math.max(0, netInvested);
@@ -216,7 +258,7 @@ export function metricsAt(
           )
         : 0;
       const manualCorrection = prices
-        .filter((p) => p.assetId === asset.id && (!until || p.date <= until))
+        .filter((p) => p.assetId === asset.id && validIsoDate(p.date) && p.date <= asOf && Number.isFinite(p.price) && p.price > 0)
         .sort((a, b) => (b.date || "").localeCompare(a.date || ""))[0];
       const fixedBase =
         manualCorrection && manualCorrection.price >= Math.max(1, netInvested * 0.5)
@@ -232,17 +274,23 @@ export function metricsAt(
             )
           )
         : days;
-      const interestRatio = (((asset.annualInterestRate ?? 0) / 100) * fixedDays) / 365;
+      const annualRate = Number.isFinite(asset.annualInterestRate) && (asset.annualInterestRate ?? 0) >= 0
+        ? asset.annualInterestRate ?? 0 : 0;
+      const interestRatio = ((annualRate / 100) * fixedDays) / 365;
       marketValue = fixedBase * (1 + interestRatio);
       displayQuantity = 1;
       unrealizedProfit = marketValue - fixedBase;
       totalProfit = unrealizedProfit;
     } else if (mode === "cash") {
-      marketValue = Math.max(0, netInvested);
+      // A negative ledger balance is missing money (or a genuine liability), not zero.
+      // Keep it visible so the owner can reconcile the account instead of inflating equity.
+      marketValue = netInvested;
       displayQuantity = marketValue;
-      totalProfit = list
-        .filter((tx) => tx.kind === "interest" || tx.notes?.includes("سود"))
-        .reduce((sum, tx) => sum + safeNumber(tx.totalPrice), 0);
+      totalProfit = list.reduce((sum, tx) => {
+        if (isInterestTransaction(tx)) return sum + (tx.type === "buy" ? 1 : -1) * safeNumber(tx.totalPrice);
+        if (tx.kind === "fee") return sum + (tx.type === "buy" ? 1 : -1) * safeNumber(tx.totalPrice);
+        return sum;
+      }, 0);
       realizedProfit = totalProfit;
       unrealizedProfit = 0;
       costBasis = Math.max(0, marketValue - totalProfit);
@@ -299,7 +347,7 @@ export function metricsAt(
       quantity: displayQuantity,
       averageCost,
       costBasis: Math.max(0, costBasis),
-      marketValue: Math.max(0, marketValue),
+      marketValue: mode === "cash" ? marketValue : Math.max(0, marketValue),
       realizedProfit,
       unrealizedProfit,
       totalProfit,
@@ -319,14 +367,18 @@ export function stockMetrics(
   prices: StockPrice[] = [],
   dividends: StockDividend[] = []
 ): StockSymbolMetric[] {
+  const asOf = todayIso();
   const safeOrders = (orders || []).filter(
-    (o) => normalizeSymbol(o.symbol) !== "کیان" && !o.symbol?.includes("کیان")
+    (o) => validIsoDate(o.date) && o.date <= asOf && hasValidStockOrder(o) &&
+      normalizeSymbol(o.symbol) !== "کیان" && !o.symbol?.includes("کیان")
   );
   const safePrices = (prices || []).filter(
-    (p) => normalizeSymbol(p.symbol) !== "کیان" && !p.symbol?.includes("کیان")
+    (p) => validIsoDate(p.date) && p.date <= asOf && Number.isFinite(p.price) && p.price > 0 &&
+      normalizeSymbol(p.symbol) !== "کیان" && !p.symbol?.includes("کیان")
   );
   const safeDividends = (dividends || []).filter(
-    (d) => normalizeSymbol(d.symbol) !== "کیان" && !d.symbol?.includes("کیان")
+    (d) => validIsoDate(d.date) && d.date <= asOf && Number.isFinite(d.amount) && d.amount > 0 &&
+      normalizeSymbol(d.symbol) !== "کیان" && !d.symbol?.includes("کیان")
   );
 
   const symbols = Array.from(new Set(safeOrders.map((order) => normalizeSymbol(order.symbol)))).filter(Boolean);
@@ -433,10 +485,10 @@ export function calculateBourseSummary(
   const currentProfitPercent = currentCost > 0 ? (currentProfit / currentCost) * 100 : 0;
 
   const purchases = (orders || [])
-    .filter((item) => item.type === "buy")
+    .filter((item) => item.type === "buy" && hasValidStockOrder(item) && validIsoDate(item.date) && item.date <= todayIso())
     .reduce((sum, item) => sum + safeNumber(item.totalPrice), 0);
   const sales = (orders || [])
-    .filter((item) => item.type === "sell")
+    .filter((item) => item.type === "sell" && hasValidStockOrder(item) && validIsoDate(item.date) && item.date <= todayIso())
     .reduce((sum, item) => sum + safeNumber(item.totalPrice), 0);
 
   const rawRealized = stockData.reduce((sum, item) => sum + item.realized, 0);
@@ -494,16 +546,20 @@ export function syncStockCashTransfers(
   const hami = assets.find((asset) => asset.name.includes("حامی"));
   const manualTransactions = (transactions || []).filter((tx) => !isGeneratedStockTransfer(tx));
 
-  if (!hami) return manualTransactions;
-
   const transfers: Transaction[] = (orders || []).flatMap<Transaction>((order) => {
+    // Old imported orders without an account used Hami. An explicitly selected but
+    // deleted/invalid account must NOT be silently redirected to Hami.
+    const cashAccount = order.sourceAssetId
+      ? assets.find((asset) => asset.id === order.sourceAssetId && isCashAccount(asset))
+      : hami;
+    if (!cashAccount) return [];
     const linked = `[stock-order:${order.id}]`;
     const total = safeNumber(order.totalPrice);
     if (order.type === "sell") {
       return [
         {
           id: `hami-stock-sell-${order.id}`,
-          assetId: hami.id,
+          assetId: cashAccount.id,
           type: "buy",
           quantity: total,
           unitPrice: 1,
@@ -519,7 +575,7 @@ export function syncStockCashTransfers(
     return [
       {
         id: `hami-stock-buy-${order.id}`,
-        assetId: hami.id,
+        assetId: cashAccount.id,
         type: "sell",
         quantity: total,
         unitPrice: 1,
@@ -617,16 +673,11 @@ export function migrateKianStockData(data: PortfolioData): {
     }
   }
 
-  // Remove generated stock transfers that were tied to Kian orders
-  const baseTxs = (data.transactions || []).filter((tx) => {
-    if (kianOrders.some((ko) => tx.id.includes(ko.id) || (tx.notes && tx.notes.includes(ko.id)))) {
-      return false;
-    }
-    return true;
-  });
-
+  // syncStockCashTransfers removes only its own generated settlement rows. A
+  // manual transaction merely mentioning a Kian order ID in its note is evidence,
+  // not a disposable duplicate: preserve it for the owner to reconcile.
   const updatedTransactions = syncStockCashTransfers(
-    [...baseTxs, ...newTransfers],
+    [...(data.transactions || []), ...newTransfers],
     cleanStockOrders,
     data.assets
   );
@@ -734,14 +785,17 @@ export function sanitizeHamiData(data: PortfolioData): {
 export function portfolioTimeline(data: PortfolioData) {
   if (!data) return [];
   const safeData = data;
+  const today = todayIso();
   const dates = Array.from(
     new Set([
       ...(safeData.transactions || []).map((t) => t.date),
       ...(safeData.prices || []).map((p) => p.date),
       ...(safeData.stockOrders || []).map((o) => o.date),
-      todayIso(),
+      ...(safeData.stockPrices || []).map((p) => p.date),
+      ...(safeData.stockDividends || []).map((d) => d.date),
+      today,
     ])
-  ).filter(Boolean).sort();
+  ).filter((date) => validIsoDate(date) && date <= today).sort();
 
   return dates.map((date) => {
     const metrics = metricsAt(safeData.assets || [], safeData.transactions || [], safeData.prices || [], date);
@@ -883,7 +937,9 @@ export function getSegmentsAtDate(
     }
   }
 
-  const total = list.reduce((sum, i) => sum + i.value, 0);
+  const total = list.reduce((sum, i) => sum + i.value, 0) +
+    metrics.filter((item) => item.asset?.name !== "بورس" && item.marketValue < 0)
+      .reduce((sum, item) => sum + item.marketValue, 0);
   return { segments: list, totalValue: total };
 }
 
@@ -929,6 +985,7 @@ export interface MonthlyCashFlow {
 
 export function getMonthlyCashFlows(data: PortfolioData): MonthlyCashFlow[] {
   if (!data) return [];
+  const asOf = todayIso();
   const map = new Map<
     string,
     {
@@ -942,9 +999,8 @@ export function getMonthlyCashFlows(data: PortfolioData): MonthlyCashFlow[] {
   >();
 
   const record = (dateIso: string, type: "buy" | "sell" | "dividend", amount: number) => {
-    if (!dateIso || amount <= 0) return;
+    if (!validIsoDate(dateIso) || dateIso > asOf || amount <= 0) return;
     const date = new Date(`${dateIso}T12:00:00`);
-    if (Number.isNaN(date.getTime())) return;
     const j = toJalaali(date);
     const key = `${j.jy}-${String(j.jm).padStart(2, "0")}`;
     const label = `${PERSIAN_MONTH_NAMES[j.jm]} ${persianDatePart(j.jy)}`;
@@ -972,10 +1028,11 @@ export function getMonthlyCashFlows(data: PortfolioData): MonthlyCashFlow[] {
     }
   };
 
-  // 1. Transactions
+  // 1. Transactions. Malformed rows stay in the audit but not in activity totals.
   for (const tx of data.transactions || []) {
+    if (!hasValidTradeAmounts(tx)) continue;
     const amt = safeNumber(tx.totalPrice);
-    if (tx.kind === "interest" || tx.notes?.includes("سود")) {
+    if (isInterestTransaction(tx) || tx.kind === "stock_dividend") {
       record(tx.date, "dividend", amt);
     } else if (tx.type === "buy") {
       record(tx.date, "buy", amt);
@@ -984,9 +1041,12 @@ export function getMonthlyCashFlows(data: PortfolioData): MonthlyCashFlow[] {
     }
   }
 
-  // 2. Paid stock dividends
+  // 2. Paid stock dividends not already represented by a cash receipt.
   for (const div of data.stockDividends || []) {
-    if (div.status === "paid") {
+    if (div.status === "paid" && !(data.transactions || []).some((tx) =>
+      tx.kind === "stock_dividend" && tx.stockDividendId === div.id &&
+      tx.type === "buy" && isCashAccount(data.assets.find((asset) => asset.id === tx.assetId))
+    )) {
       record(div.date, "dividend", safeNumber(div.amount));
     }
   }

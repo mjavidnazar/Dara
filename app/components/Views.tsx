@@ -3,6 +3,7 @@
 import { Fragment, useMemo, useState } from "react";
 import {
   Activity,
+  AlertTriangle,
   ArrowDown,
   ArrowDownLeft,
   ArrowRightLeft,
@@ -38,13 +39,18 @@ import {
   Wallet,
 } from "lucide-react";
 import { DonutChart, LineChart } from "./Charts";
+import { CapitalHealthPanel } from "./CapitalHealthPanel";
 import { InfoButton } from "./InfoGuide";
+import type { AuditTarget, CapitalReport } from "../lib/capitalReport";
+import { indexTransactionReviews } from "../lib/transactionReviews";
+import type { TransactionReview } from "../lib/transactionReviews";
 import { JalaliDatePicker } from "./JalaliDatePicker";
 import {
   StockDividendModal,
   StockSymbolTradesModal,
 } from "./Modals";
 import { exportAssetCardPdf } from "../lib/pdfExport";
+import { describeTransactionNote } from "../lib/transactionDescriptions";
 import {
   CHART_TIME_RANGES,
   ChartTimeRange,
@@ -53,6 +59,10 @@ import {
   getMonthlyCashFlows,
   getRangeStartDate,
   getSegmentsAtDate,
+  hasValidStockOrder,
+  hasValidTradeAmounts,
+  isGeneratedStockTransfer,
+  isInterestTransaction,
   money,
   nf,
   percent,
@@ -61,6 +71,7 @@ import {
   todayIso,
   toPersianDate,
   transactionLabel,
+  validIsoDate,
 } from "../lib/portfolio";
 import type {
   Asset,
@@ -140,6 +151,9 @@ export function DashboardView({
   onSetKianBalance,
   onShowTransactions,
   onNavigateToStocks,
+  capitalReport,
+  onShowCapitalReport,
+  onImportBackup,
 }: {
   data: PortfolioData;
   metrics: AssetMetric[];
@@ -154,6 +168,9 @@ export function DashboardView({
   onSetKianBalance: () => void;
   onShowTransactions: () => void;
   onNavigateToStocks: () => void;
+  capitalReport: CapitalReport;
+  onShowCapitalReport: () => void;
+  onImportBackup: () => void;
 }) {
   const topAssets = useMemo(
     () => [...metrics].sort((a, b) => b.marketValue - a.marketValue).slice(0, 5),
@@ -172,9 +189,12 @@ export function DashboardView({
   );
 
   const lastPriceDate = useMemo(() => {
-    const dates = [...(data.prices || []).map((p) => p.date), ...(data.stockPrices || []).map((sp) => sp.date)];
-    if (!dates.length) return todayIso();
-    return dates.sort().reverse()[0];
+    const today = todayIso();
+    const dates = [
+      ...(data.prices || []).filter((p) => Number.isFinite(p.price) && p.price > 0).map((p) => p.date),
+      ...(data.stockPrices || []).filter((p) => Number.isFinite(p.price) && p.price > 0).map((p) => p.date),
+    ].filter((date) => validIsoDate(date) && date <= today);
+    return dates.sort().reverse()[0] || null;
   }, [data.prices, data.stockPrices]);
 
   const recentTransactions = useMemo(
@@ -211,9 +231,27 @@ export function DashboardView({
     const historic = getSegmentsAtDate(data, startDate);
     return { segments: historic.segments, total: historic.totalValue };
   }, [data, segments, totalValue, allocationRange, allocationAtStart]);
+  const allocationBase = segments.reduce((sum, item) => sum + Math.max(0, item.value), 0);
+  const isNewPortfolio = !data.assets.length && !data.transactions.length && !data.stockOrders.length;
+  const needsFundingReview = capitalReport.initialCapital === null || capitalReport.fundingCandidates.length > 0;
+  const nextReviewTitle = needsFundingReview
+    ? `گام ۱: منشأ سرمایه را مشخص کنید · ${nf.format(capitalReport.fundingCandidates.length)} ورودی بی‌منبع`
+    : capitalReport.cashShortfalls.length
+      ? `گام ۲: ماندهٔ منفی حساب‌ها را ردگیری کنید · ${nf.format(capitalReport.cashShortfalls.length)} دوره`
+      : `تطبیق ${nf.format(capitalReport.issues.length)} مورد باقیمانده`;
 
   return (
     <div className="view-container">
+      <div className={`capital-dashboard-banner ${capitalReport.isReliable ? "ready" : "review"}`}>
+        {capitalReport.isReliable ? <ShieldCheck size={23} /> : <Activity size={23} />}
+        <div>
+          <b>{isNewPortfolio ? "هنوز داده‌ای وارد نشده؛ برای نمایش گزارش واقعی، پشتیبان خود را بازیابی کنید" : capitalReport.isReliable ? "کنترل‌های داخلی بدون هشدارند؛ صورت‌حساب‌ها را هم تطبیق دهید" : nextReviewTitle}</b>
+          <span>{isNewPortfolio ? "دادهٔ نمونه به‌جای اطلاعات شما نمایش داده نمی‌شود؛ فایل JSON فقط در مرورگر شما خوانده می‌شود." : capitalReport.isReliable ? `سرمایهٔ اولیهٔ ثبت‌شده: ${money(capitalReport.initialCapital ?? 0)} · سود محاسباتی: ${signedMoney(capitalReport.recordedProfit)}؛ تأیید خارجی انجام نشده است.` : `سرمایهٔ اولیه: ${capitalReport.initialCapital === null ? "هنوز نامشخص" : money(capitalReport.initialCapital)}. سود نهایی تا تعیین منشأ پول و رفع کسری‌ها نمایش داده نمی‌شود.`}</span>
+        </div>
+        <button type="button" className="button secondary small-btn" onClick={isNewPortfolio ? onImportBackup : onShowCapitalReport}>
+          {isNewPortfolio ? <>بازیابی فایل پشتیبان <Upload size={15} /></> : <>مشاهده گزارش و اصلاح <ArrowUpLeft size={15} /></>}
+        </button>
+      </div>
       {/* 4 Hero KPI Cards */}
       <section className="hero-metrics">
         <article className="hero-card primary-kpi">
@@ -228,25 +266,21 @@ export function DashboardView({
                 "برای طلا، سکه، تتر و ارز، آخرین قیمت ثبت‌شده در سیستم اعمال می‌گردد.",
                 "برای سهام بورس، آخرین قیمت پایانی روز معاملاتی لحاظ می‌شود.",
                 "مانده حساب حامی مفید، صندوق درآمد ثابت کیان و دفتر گواهی سپرده به‌عنوان نقدینگی به این رقم افزوده می‌شود.",
-                "درصد بازدهی کل از رابطه: (کل سود و زیان ÷ کل سرمایه واریز شده) × ۱۰۰ محاسبه می‌شود."
+                "نشان درصدی این کارت بر پایهٔ بهای تمام‌شدهٔ موجودی فعلی است؛ برای پول اولیه و سود پس از ورود/خروج وجه، گزارش سرمایه را ببینید."
               ]}
             />
           </div>
           <div className="card-val-row">
             <h2>{money(totalValue)}</h2>
-            <span className={`pill-badge ${totalProfitPercent >= 0 ? "positive" : "negative"}`}>
-              {percent(totalProfitPercent)}
-            </span>
+            {capitalReport.isReliable ? (
+              <span className={`pill-badge ${totalProfitPercent >= 0 ? "positive" : "negative"}`} title="نسبت سود به بهای تمام‌شده؛ نه بازدهی زمانی پول اولیه">{percent(totalProfitPercent)}</span>
+            ) : <span className="pill-badge neutral">ارزشِ نیازمند تطبیق</span>}
           </div>
-          <div className="kpi-progress">
-            <span
-              style={{
-                width: `${Math.min(100, Math.max(0, totalProfitPercent + 50))}%`,
-                background: totalProfit >= 0 ? "#10b981" : "#ef4444",
-              }}
-            />
-          </div>
-          <p className="card-sub">تمام ارزش‌های بازار به روز شده‌اند</p>
+          {capitalReport.isReliable && <div className="kpi-progress"><span style={{
+            width: `${Math.min(100, Math.max(0, totalProfitPercent + 50))}%`,
+            background: totalProfit >= 0 ? "#10b981" : "#ef4444",
+          }} /></div>}
+          <p className="card-sub">{capitalReport.isReliable ? "نسبت سود به بهای تمام‌شده، نه بازدهی پول اولیه" : "اول منشأ سرمایه و ماندهٔ حساب‌ها را در گزارش گام‌به‌گام بررسی کنید."}</p>
         </article>
 
         <article className="hero-card">
@@ -255,7 +289,7 @@ export function DashboardView({
             <InfoButton
               title="مجموع سود و زیان کل پورتفو"
               formula="سود کل = مجموع سود/زیان محقق‌شده فروش‌ها + سود جاری دارایی‌های موجود (ارزش روز - بهای تمام‌شده) + سود مجامع سهام + سود واریزی حامی"
-              description="ارزیابی جامع و دقیق تمام سودآوری‌های نقدی و رشدی سبد از اولین روز تا به امروز."
+              description="جمع سود محاسبه‌شده از معاملات و ارزش روز؛ نبود هشدار داخلی، جای تأیید ارقام با صورت‌حساب‌ها را نمی‌گیرد."
               details={[
                 "سود محقق‌شده (Realized): سود قطعی حاصل از بستن یا فروش پله‌ای دارایی‌ها.",
                 "سود جاری یا تحقق‌نیافته (Unrealized): اختلاف بین ارزش روز موجودی فعلی با قیمت خرید آن.",
@@ -264,12 +298,12 @@ export function DashboardView({
             />
           </div>
           <div className="card-val-row">
-            <h2 className={totalProfit >= 0 ? "positive-text" : "negative-text"}>
-              {signedMoney(totalProfit)}
+            <h2 className={capitalReport.isReliable ? (totalProfit >= 0 ? "positive-text" : "negative-text") : ""}>
+              {capitalReport.isReliable ? signedMoney(totalProfit) : "پس از تطبیق سرمایه و حساب‌ها"}
             </h2>
           </div>
           <p className="card-sub">
-            شامل سود تحقق‌یافته، رشد ارزش بازار و سود مجمع
+            {capitalReport.isReliable ? "سود محاسباتی از داده‌های ثبت‌شده؛ با صورت‌حساب‌ها تأیید کنید." : "عدد خامِ سود در جزئیات گزارش هست، اما هنوز نتیجهٔ قابل اتکا نیست."}
           </p>
         </article>
 
@@ -287,7 +321,7 @@ export function DashboardView({
             />
           </div>
           <div className="card-val-row">
-            <h2 style={{ fontSize: "20px" }}>{toPersianDate(lastPriceDate)}</h2>
+            <h2 style={{ fontSize: "20px" }}>{lastPriceDate ? toPersianDate(lastPriceDate) : "ثبت نشده"}</h2>
           </div>
           <p className="card-sub">قیمت‌های طلا، سهام، تتر و سایر دارایی‌ها</p>
         </article>
@@ -427,16 +461,16 @@ export function DashboardView({
                 <InfoButton
                   title="نمودار رشد ارزش پورتفوی"
                   formula="ترسیم تاریخچه روزانه ارزش کل دارایی‌ها بر پایه نرخ‌های روز و جریان معاملات | تغییر بازه = ارزش پایان بازه - ارزش ابتدای بازه"
-                  description="نمایش روند زمانی رشد سرمایه در طول زمان با قابلیت تفکیک بازه‌های هفتگی، ماهانه، سالانه و کل."
+                  description="روند ارزش شامل تغییرات قیمت و واریز/برداشت پول است؛ افزایش ارزش در بازه لزوماً سود نیست. برای سود پس از جریان پول گزارش سرمایه را ببینید."
                   details={[
-                    "تغییر در بازه نشان‌دهنده میزان سود/رشد ریالی در محدوده زمانی انتخاب‌شده است.",
-                    "درصد رشد بازه = (تغییر ارزش در بازه ÷ ارزش ابتدای بازه) × ۱۰۰",
-                    "نقاط عطف نمودار با واریز، برداشت یا نوسانات عمده بازار تطبیق دارند."
+                    "تغییر ارزش بازه ترکیبی از ورود و خروج سرمایه و تغییر قیمت دارایی‌هاست.",
+                    "اگر مانده‌های گذشتهٔ کپی‌ترید ثبت نشده باشد، بخش تاریخی آن از خرید/برداشت دلاری تخمین زده می‌شود.",
+                    "درصد تغییر ارزش بازه = (تغییر ارزش در بازه ÷ ارزش ابتدای بازه) × ۱۰۰."
                   ]}
                 />
               </div>
               <p>
-                روند تاریخی ارزش کل دارایی‌ها
+                روند ارزش (شامل واریز/برداشت؛ نه سود خالص)
                 {timelineDelta && timelineRange !== "all" && (
                   <span className="chart-delta-badge">
                     · تغییر در بازه:{" "}
@@ -530,7 +564,7 @@ export function DashboardView({
               <h3 style={{ margin: 0 }}>بزرگ‌ترین سهم‌های پورتفوی</h3>
               <InfoButton
                 title="بزرگ‌ترین سهم‌های پورتفوی"
-                formula="مرتب‌سازی دارایی‌ها بر اساس بیشترین ارزش روز (موجودی × قیمت روز) و محاسبه درصد سهم از کل ارزش سبد"
+                formula="سهم از دارایی‌های مثبت = ارزش روز این دارایی ÷ مجموع ارزش مثبت دارایی‌ها؛ مانده‌های منفی از خالص ارزش سبد کسر می‌شوند."
                 description="نمایش ۵ دارایی با بیشترین حجم سرمایه به همراه میله وزن نسبی و درصد سود یا زیان هر کدام."
                 details={[
                   "رتبه ۱ نشان‌دهنده سنگین‌ترین دارایی پورتفوی شماست.",
@@ -542,7 +576,7 @@ export function DashboardView({
           </div>
           <div className="ranking-list">
             {topAssets.map((item, idx) => {
-              const share = totalValue > 0 ? (item.marketValue / totalValue) * 100 : 0;
+              const share = allocationBase > 0 ? (Math.max(0, item.marketValue) / allocationBase) * 100 : 0;
               return (
                 <div className="ranking-row" key={item.asset.id}>
                   <span className="rank-num">۰{idx + 1}</span>
@@ -617,6 +651,7 @@ export function StocksDashboardView({
   items,
   data,
   onSavePrices,
+  onManagePrices,
   onSaveHamiInterest,
   onSaveHamiCashTransfer,
   onDividend,
@@ -628,12 +663,14 @@ export function StocksDashboardView({
   items: StockSymbolMetric[];
   data: PortfolioData;
   onSavePrices: (updates: StockPrice[]) => void;
+  onManagePrices: () => void;
   onSaveHamiInterest: (amount: number, date: string, note: string) => void;
   onSaveHamiCashTransfer?: (
     direction: "deposit" | "withdraw",
     amount: number,
     date: string,
-    note: string
+    note: string,
+    source: "bank" | "external"
   ) => void;
   onDividend: (dividend: StockDividend) => void;
   onEditOrder: (order: StockOrder) => void;
@@ -653,6 +690,8 @@ export function StocksDashboardView({
   const [hamiAmount, setHamiAmount] = useState("");
   const [hamidate, setHamiDate] = useState(todayIso());
   const [hamiNote, setHamiNote] = useState("");
+  const [hamiCashSource, setHamiCashSource] = useState<"bank" | "external">("bank");
+  const bankAccount = data.assets.find((asset) => asset.id === "asset-bank" || asset.name === "بانک");
 
   const currentStocks = useMemo(() => items.filter((item) => item.quantity > 0), [items]);
   const soldStocks = useMemo(
@@ -678,10 +717,10 @@ export function StocksDashboardView({
     totalCurrentCost > 0 ? (totalCurrentProfit / totalCurrentCost) * 100 : 0;
 
   const totalPurchases = (data.stockOrders || [])
-    .filter((item) => item.type === "buy")
+    .filter((item) => validIsoDate(item.date) && item.date <= todayIso() && hasValidStockOrder(item) && item.type === "buy")
     .reduce((sum, item) => sum + safeNumber(item.totalPrice), 0);
   const totalSales = (data.stockOrders || [])
-    .filter((item) => item.type === "sell")
+    .filter((item) => validIsoDate(item.date) && item.date <= todayIso() && hasValidStockOrder(item) && item.type === "sell")
     .reduce((sum, item) => sum + safeNumber(item.totalPrice), 0);
 
   const totalRealizedTrades = items.reduce((sum, item) => sum + item.realized, 0);
@@ -699,7 +738,7 @@ export function StocksDashboardView({
 
   const hami = data.assets.find((asset) => asset.name.includes("حامی"));
   const hamiTransactions = hami
-    ? data.transactions.filter((tx) => tx.assetId === hami.id)
+    ? data.transactions.filter((tx) => tx.assetId === hami.id && validIsoDate(tx.date) && tx.date <= todayIso() && hasValidTradeAmounts(tx))
     : [];
   const hamiBalance = hamiTransactions.reduce(
     (sum, tx) =>
@@ -851,11 +890,12 @@ export function StocksDashboardView({
   const totalSoldReturnPercent =
     totalSoldPurchases > 0 ? (totalSoldProfit / totalSoldPurchases) * 100 : 0;
   const hamiTotalInterest = hamiTransactions
-    .filter((tx) => tx.kind === "interest" || tx.notes?.includes("سود"))
+    .filter(isInterestTransaction)
     .reduce((sum, tx) => sum + safeNumber(tx.totalPrice), 0);
 
   const handlePriceUpdateSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!validIsoDate(priceDate) || priceDate > todayIso()) return;
     const updates: StockPrice[] = Object.entries(pricesState)
       .map(([symbol, priceStr]) => ({
         id: `sp-${symbol}-${priceDate}`,
@@ -887,7 +927,7 @@ export function StocksDashboardView({
       if (hamiOpMode === "interest") {
         onSaveHamiInterest(amount, hamidate, hamiNote);
       } else if (onSaveHamiCashTransfer) {
-        onSaveHamiCashTransfer(hamiOpMode, amount, hamidate, hamiNote);
+        onSaveHamiCashTransfer(hamiOpMode, amount, hamidate, hamiNote, bankAccount ? hamiCashSource : "external");
       }
       setHamiAmount("");
       setHamiNote("");
@@ -1733,6 +1773,7 @@ export function StocksDashboardView({
               <span>تاریخ اعمال قیمت‌ها</span>
               <JalaliDatePicker value={priceDate} onChange={setPriceDate} />
             </label>
+            {!validIsoDate(priceDate) || priceDate > todayIso() ? <small className="negative-text">تاریخ نرخ پایانی باید معتبر باشد و از امروز جلوتر نباشد.</small> : null}
             <div className="bulk-price-list">
               {currentStocks.map((stock) => (
                 <label className="bulk-price-row" key={stock.symbol}>
@@ -1752,8 +1793,11 @@ export function StocksDashboardView({
               ))}
             </div>
             <div className="modal-actions">
-              <button type="submit" className="button primary">
+              <button type="submit" className="button primary" disabled={!validIsoDate(priceDate) || priceDate > todayIso() || !Object.values(pricesState).some((value) => safeNumber(value) > 0)}>
                 ثبت قیمت‌های جدید سهام
+              </button>
+              <button type="button" className="button secondary" onClick={onManagePrices}>
+                تاریخچه و اصلاح قیمت‌های سهام
               </button>
             </div>
           </form>
@@ -1804,6 +1848,15 @@ export function StocksDashboardView({
           </div>
 
           <form className="modal-form" onSubmit={handleHamiSubmit}>
+            {hamiOpMode !== "interest" && bankAccount && (
+              <label>
+                <span>مبدأ / مقصد پول</span>
+                <select value={hamiCashSource} onChange={(e) => setHamiCashSource(e.target.value as "bank" | "external")}>
+                  <option value="bank">حساب بانک داخل سبد (ثبت خودکار هر دو طرف انتقال)</option>
+                  <option value="external">بیرون از سبد (آوردهٔ جدید / برداشت از سبد)</option>
+                </select>
+              </label>
+            )}
             <label>
               <span>
                 {hamiOpMode === "interest"
@@ -1855,6 +1908,7 @@ export function StocksDashboardView({
         <StockSymbolTradesModal
           symbol={selectedSymbol}
           orders={data.stockOrders}
+          cashAccounts={data.assets.filter((asset) => assetMode(asset) === "cash")}
           onClose={() => setSelectedSymbol(null)}
           onEditOrder={onEditOrder}
         />
@@ -2187,8 +2241,22 @@ export function AssetsView({
   );
 }
 
+function transactionIssueDetail(issue: TransactionReview["issues"][number]) {
+  // The audit retains technical IDs for diagnosis, but the list should explain
+  // suspected duplicate movements without repeating those opaque IDs.
+  if (issue.id.startsWith("cash-duplicate-")) {
+    return "دو گردش وجه در یک حساب و یک روز، با مبلغ و شرح یکسان ثبت شده‌اند. صورت‌حساب را مقایسه کنید؛ فقط اگر یکی واقعاً تکراری است پس از تأیید حذف کنید. تغییر ماهیت به‌تنهایی ثبت تکراری را حذف نمی‌کند.";
+  }
+  if (issue.id.startsWith("duplicate-") && !issue.id.startsWith("duplicate-id-")) {
+    return "ردیف دیگری با همین تاریخ، دارایی و مبلغ ثبت شده است. پیش از هر اصلاح یا حذف، اسناد هر دو ردیف را مقایسه کنید.";
+  }
+  return issue.detail;
+}
+
 export function TransactionsView({
   data,
+  capitalReport,
+  onShowReport,
   onAdd,
   onEdit,
   onDelete,
@@ -2203,6 +2271,8 @@ export function TransactionsView({
   onSetHamiBalance,
 }: {
   data: PortfolioData;
+  capitalReport: CapitalReport;
+  onShowReport?: () => void;
   onAdd: () => void;
   onEdit: (tx: Transaction) => void;
   onDelete: (tx: Transaction) => void;
@@ -2221,6 +2291,17 @@ export function TransactionsView({
   const [filterFrom, setFilterFrom] = useState<string>("");
   const [filterTo, setFilterTo] = useState<string>("");
   const [searchQuery, setSearchQuery] = useState<string>("");
+  const [reviewFilter, setReviewFilter] = useState<"all" | "errors" | "attention">("all");
+  const reviewIndex = useMemo(() => indexTransactionReviews(capitalReport), [capitalReport]);
+  const duplicateTransactionIds = useMemo(() => {
+    const seen = new Set<string>();
+    const duplicates = new Set<string>();
+    for (const tx of data.transactions) {
+      if (seen.has(tx.id)) duplicates.add(tx.id);
+      seen.add(tx.id);
+    }
+    return duplicates;
+  }, [data.transactions]);
 
   type TxSortKey = "type" | "asset" | "date" | "quantity" | "unitPrice" | "totalPrice" | "notes";
   const [txSortKey, setTxSortKey] = useState<TxSortKey>("date");
@@ -2261,6 +2342,7 @@ export function TransactionsView({
     attachmentIds?: string[];
     rawTx?: Transaction;
     stockOrder?: StockOrder;
+    review?: TransactionReview;
   }
 
   const allRows = useMemo<UnifiedRow[]>(() => {
@@ -2290,6 +2372,7 @@ export function TransactionsView({
           ? `${order.notes}${commissionText} [تسویه با ${sourceName}]`
           : `${order.type === "buy" ? "خرید" : "فروش"} ${nf.format(order.quantity)} سهم ${order.symbol}${commissionText} [تسویه با ${sourceName}]`,
         stockOrder: order,
+        review: reviewIndex.stockOrders.get(order.id),
       };
     });
 
@@ -2299,14 +2382,13 @@ export function TransactionsView({
       const isHamiSettlement =
         tx.assetId === "asset-hami" && (tx.notes?.includes("[stock-order:") || tx.kind === "transfer");
       
-      // Check if we can link this Hami settlement to its stock order
-      let linkedOrder: StockOrder | undefined = undefined;
-      if (isHamiSettlement && tx.notes) {
-        const match = tx.notes.match(/\[stock-order:([^\]]+)\]/);
-        if (match && match[1]) {
-          linkedOrder = data.stockOrders?.find((o) => o.id === match[1]);
-        }
-      }
+      // A generated settlement can belong to any selected cash account, not
+      // only Hami. Its editable source is the stock order, not the cash leg.
+      const linkedOrderId = isGeneratedStockTransfer(tx)
+        ? tx.notes?.match(/\[stock-order:([^\]]+)\]/)?.[1] || tx.id.replace(/^hami-stock-(buy|sell|sale)-/, "")
+        : undefined;
+      const linkedOrder = linkedOrderId
+        ? data.stockOrders?.find((order) => order.id === linkedOrderId) : undefined;
 
       return {
         id: tx.id,
@@ -2319,18 +2401,27 @@ export function TransactionsView({
         unit: asset?.unit || "تومان",
         unitPrice: tx.unitPrice,
         totalPrice: tx.totalPrice,
-        notes: tx.notes || "",
+        notes: describeTransactionNote(data, tx),
         attachmentIds: tx.attachmentIds,
         rawTx: tx,
         stockOrder: linkedOrder,
+        review: reviewIndex.transactions.get(tx.id),
       };
     });
 
     return [...stockRows, ...txRows];
-  }, [data.transactions, data.stockOrders, data.assets, bourseAsset]);
+  }, [data, bourseAsset, reviewIndex]);
+
+  const reviewCounts = useMemo(() => allRows.reduce((counts, row) => {
+    if (row.review?.severity === "error") counts.errors += 1;
+    else if (row.review?.severity === "warning") counts.warnings += 1;
+    return counts;
+  }, { errors: 0, warnings: 0 }), [allRows]);
 
   const filtered = useMemo(() => {
     return allRows.filter((row) => {
+      if (reviewFilter === "errors" && row.review?.severity !== "error") return false;
+      if (reviewFilter === "attention" && !row.review) return false;
       if (filterType !== "all" && row.type !== filterType) return false;
 
       if (filterAsset !== "all") {
@@ -2351,15 +2442,18 @@ export function TransactionsView({
 
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
-        const matchNote = row.notes?.toLowerCase().includes(q);
+        const matchNote = row.notes.toLowerCase().includes(q) ||
+          Boolean(row.rawTx?.notes?.toLowerCase().includes(q));
         const matchName = row.assetName.toLowerCase().includes(q);
         const matchSymbol = row.symbol?.toLowerCase().includes(q);
-        if (!matchNote && !matchName && !matchSymbol) return false;
+        const matchReview = row.review?.issues.some((issue) =>
+          issue.title.toLowerCase().includes(q) || transactionIssueDetail(issue).toLowerCase().includes(q));
+        if (!matchNote && !matchName && !matchSymbol && !matchReview) return false;
       }
 
       return true;
     });
-  }, [allRows, filterType, filterAsset, isBourseFilter, filterFrom, filterTo, searchQuery]);
+  }, [allRows, reviewFilter, filterType, filterAsset, isBourseFilter, filterFrom, filterTo, searchQuery]);
 
   const sortedTransactions = useMemo(() => {
     return [...filtered].sort((a, b) => {
@@ -2407,6 +2501,7 @@ export function TransactionsView({
   }, [filtered, filterAsset]);
 
   const hasActiveFilters =
+    reviewFilter !== "all" ||
     filterType !== "all" ||
     filterAsset !== "all" ||
     Boolean(filterFrom) ||
@@ -2414,6 +2509,7 @@ export function TransactionsView({
     Boolean(searchQuery.trim());
 
   const resetFilters = () => {
+    setReviewFilter("all");
     setFilterType("all");
     setFilterAsset("all");
     setFilterFrom("");
@@ -2428,11 +2524,21 @@ export function TransactionsView({
           <div className="search-box small-search">
             <Search size={16} />
             <input
-              placeholder="جستجو در شرح، نماد یا نام دارایی…"
+              placeholder="جستجو در شرح، خطا، نماد یا نام دارایی…"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
           </div>
+
+          <select
+            aria-label="فیلتر وضعیت بررسی ردیف‌ها"
+            value={reviewFilter}
+            onChange={(e) => setReviewFilter(e.target.value as typeof reviewFilter)}
+          >
+            <option value="all">همهٔ ردیف‌ها</option>
+            <option value="errors">فقط خطاهای کنترلی</option>
+            <option value="attention">خطاها و موارد نیازمند بررسی</option>
+          </select>
 
           <select value={filterType} onChange={(e) => setFilterType(e.target.value)}>
             <option value="all">تمام انواع معاملات</option>
@@ -2653,7 +2759,7 @@ export function TransactionsView({
             <small>تعداد معاملات</small>
             <InfoButton
               title="تعداد معاملات فیلترشده"
-              formula="شمارش تعداد رکوردهای منطبق با فیلترهای جستجو، نوع، دارایی و بازه تاریخی"
+              formula="شمارش تعداد رکوردهای منطبق با فیلترهای وضعیت بررسی، جستجو، نوع، دارایی و بازه تاریخی"
               description="تعداد سفارش‌ها و عملیات مالی انجام‌شده در پورتفو."
             />
           </div>
@@ -2713,6 +2819,14 @@ export function TransactionsView({
             />
           </div>
           <span className="tag">{nf.format(filtered.length)} تراکنش</span>
+        </div>
+        <div className="transaction-review-guide" aria-label="وضعیت بررسی معاملات">
+          <div className="transaction-review-counts">
+            <span className="transaction-review-count error"><AlertTriangle size={15} aria-hidden="true" /> {nf.format(reviewCounts.errors)} ردیف با خطای کنترلی</span>
+            <span className="transaction-review-count warning"><AlertTriangle size={15} aria-hidden="true" /> {nf.format(reviewCounts.warnings)} ردیف نیازمند بررسی</span>
+          </div>
+          <p>شمارش برای کل دفتر است؛ فیلتر بالا فقط ردیف‌های دلخواه را نشان می‌دهد. این نشان‌ها نتیجهٔ کنترل هستند، نه اثبات اشتباه ردیف. فقط پس از تطبیق با سند ویرایش کنید؛ موارد مربوط به قیمت، سود مجمع و کل سرمایه در گزارش کامل‌اند.</p>
+          {onShowReport && <button type="button" className="button ghost small-btn" onClick={onShowReport}>گزارش کامل سرمایه</button>}
         </div>
         <div className="table-wrapper">
           <table className="data-table">
@@ -2778,11 +2892,15 @@ export function TransactionsView({
                   </td>
                 </tr>
               ) : (
-                sortedTransactions.map((row) => {
+                sortedTransactions.map((row, index) => {
                   const isStockOrder = row.sourceType === "stock_order";
                   const isHamiSettlement = row.sourceType === "hami_settlement";
+                  const generatedSettlement = Boolean(row.rawTx && isGeneratedStockTransfer(row.rawTx));
+                  const hasDuplicateId = Boolean(row.rawTx && duplicateTransactionIds.has(row.rawTx.id));
+                  const canQuickEdit = isStockOrder || generatedSettlement
+                    ? Boolean(row.stockOrder && onEditStockOrder) : Boolean(row.rawTx);
                   return (
-                    <tr key={row.id}>
+                    <tr key={`${row.sourceType}-${row.id}-${index}`} className={row.review ? `transaction-review-row ${row.review.severity}` : undefined}>
                       <td>
                         <span className={`pill-badge ${row.type === "buy" ? "positive" : "negative"}`}>
                           {isStockOrder
@@ -2793,17 +2911,42 @@ export function TransactionsView({
                         </span>
                       </td>
                       <td>
-                        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                          <b>{row.assetName}</b>
-                          {row.symbol && (
-                            <span className="stock-symbol-badge" style={{ fontSize: "11px" }}>
-                              {row.symbol}
-                            </span>
-                          )}
-                          {isHamiSettlement && (
-                            <span className="tag" style={{ fontSize: "10px", padding: "1px 6px" }}>
-                              تسویه معامله
-                            </span>
+                        <div className="transaction-review-asset">
+                          <div className="transaction-review-asset-name">
+                            <b>{row.assetName}</b>
+                            {row.symbol && (
+                              <span className="stock-symbol-badge" style={{ fontSize: "11px" }}>
+                                {row.symbol}
+                              </span>
+                            )}
+                            {isHamiSettlement && (
+                              <span className="tag" style={{ fontSize: "10px", padding: "1px 6px" }}>
+                                تسویه معامله
+                              </span>
+                            )}
+                          </div>
+                          {row.review && (
+                            <div className={`transaction-review-asset-flag ${row.review.severity}`}>
+                              <span><AlertTriangle size={13} aria-hidden="true" /> {row.review.severity === "error" ? "خطای کنترلی" : "نیازمند بررسی"}</span>
+                              <small>{row.review.issues[0].title}</small>
+                              {hasDuplicateId ? (
+                                <small>شناسهٔ تکراری؛ ویرایش تکی امن نیست.</small>
+                              ) : generatedSettlement && !row.stockOrder ? (
+                                <small>سفارش مرتبط پیدا نشد؛ فایل پشتیبان را بررسی کنید.</small>
+                              ) : canQuickEdit && (
+                                <button
+                                  type="button"
+                                  className="button secondary small-btn transaction-review-inline-edit"
+                                  onClick={() => {
+                                    if ((isStockOrder || generatedSettlement) && row.stockOrder) onEditStockOrder?.(row.stockOrder);
+                                    else if (row.rawTx) onEdit(row.rawTx);
+                                  }}
+                                  aria-label={`بررسی و ویرایش ${isStockOrder ? `سفارش ${row.assetName}` : generatedSettlement ? `سفارش مرتبط با ${row.assetName}` : `معاملهٔ ${row.assetName}`}: ${row.review.issues[0].title}`}
+                                >
+                                  <Pencil size={12} aria-hidden="true" /> {generatedSettlement ? "ویرایش سفارش مرتبط" : isStockOrder ? "ویرایش همین سفارش" : "ویرایش همین ردیف"}
+                                </button>
+                              )}
+                            </div>
                           )}
                         </div>
                       </td>
@@ -2817,6 +2960,24 @@ export function TransactionsView({
                       </td>
                       <td>
                         <div className="notes-cell" style={{ whiteSpace: "pre-line", lineHeight: 1.4 }}>
+                          {row.review && (
+                            <div className={`transaction-review-note ${row.review.severity}`}>
+                              <div className="transaction-review-head">
+                                <span className="transaction-review-label">
+                                  <AlertTriangle size={14} aria-hidden="true" />
+                                  {row.review.severity === "error" ? "خطای کنترلی" : "نیازمند بررسی"}
+                                </span>
+                                <strong>{row.review.issues[0].title}</strong>
+                                {row.review.issues.length > 1 && <span>+ {nf.format(row.review.issues.length - 1)} مورد دیگر</span>}
+                              </div>
+                              <details className="transaction-review-details">
+                                <summary>دلیل و راهنمای بررسی</summary>
+                                <ul>{row.review.issues.map((issue) => (
+                                  <li key={issue.id}><b>{issue.title}:</b> {transactionIssueDetail(issue)}</li>
+                                ))}</ul>
+                              </details>
+                            </div>
+                          )}
                           <span>{row.notes || "—"}</span>
                           {row.attachmentIds && row.attachmentIds.length > 0 && (
                             <span className="tag">
@@ -2831,11 +2992,11 @@ export function TransactionsView({
                           {isStockOrder && row.stockOrder && onEditStockOrder && (
                             <button
                               type="button"
-                              className="button ghost small-btn"
+                              className={`button ${row.review ? "secondary" : "ghost"} small-btn`}
                               onClick={() => onEditStockOrder(row.stockOrder!)}
                               title="ویرایش این سفارش سهام"
                             >
-                              ویرایش
+                              {row.review ? "بررسی و ویرایش" : "ویرایش"}
                             </button>
                           )}
                           {isStockOrder && row.stockOrder && onDeleteStockOrder && (
@@ -2866,20 +3027,23 @@ export function TransactionsView({
                             <>
                               <button
                                 type="button"
-                                className="button ghost small-btn"
+                                className={`button ${row.review ? "secondary" : "ghost"} small-btn`}
                                 onClick={() => onEdit(row.rawTx!)}
-                                title="ویرایش تراکنش"
+                                disabled={hasDuplicateId}
+                                title={hasDuplicateId ? "شناسهٔ این تراکنش تکراری است؛ ویرایش تکی امن نیست" : generatedSettlement ? "ویرایش سفارش بورس مرتبط با این تسویه" : "ویرایش تراکنش"}
                               >
-                                ویرایش
+                                {generatedSettlement ? "ویرایش سفارش مرتبط" : row.review ? "بررسی و ویرایش" : "ویرایش"}
                               </button>
                               <button
                                 type="button"
                                 className="button ghost danger small-btn"
                                 onClick={() => onDelete(row.rawTx!)}
-                                title="حذف تراکنش"
+                                disabled={hasDuplicateId}
+                                title={hasDuplicateId ? "شناسهٔ این تراکنش تکراری است؛ حذف تکی امن نیست" : generatedSettlement ? "حذف سفارش بورس و تسویهٔ مرتبط، پس از تأیید" : "حذف تراکنش"}
                               >
-                                حذف
+                                {generatedSettlement ? "حذف سفارش" : "حذف"}
                               </button>
+                              {hasDuplicateId && <span className="transaction-review-unsafe">شناسهٔ تکراری؛ ویرایش یا حذف تکی امن نیست. فایل پشتیبان را بررسی کنید.</span>}
                             </>
                           )}
                         </div>
@@ -3225,7 +3389,7 @@ function AssetDetailChartVisualizer({
         <div className="asset-capital-flow-wrap">
           <div className="capital-flow-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))" }}>
             <div className="capital-metric-tile" style={{ borderRight: "3px solid #0284c7" }}>
-              <span className="tile-label">آورده اولیه واقعی از جیب</span>
+              <span className="tile-label">حداکثر سرمایهٔ درگیر این دارایی</span>
               <span className="tile-val" style={{ color: "#0369a1" }}>
                 {money(item.freshCapital)}
               </span>
@@ -3255,7 +3419,7 @@ function AssetDetailChartVisualizer({
               <small>{nf.format(item.quantity)} {asset.unit || "واحد"} در سبد</small>
             </div>
             <div className="capital-metric-tile" style={{ borderRight: `3px solid ${item.totalProfit >= 0 ? "#10b981" : "#ef4444"}` }}>
-              <span className="tile-label">سود کل روی آورده اولیه (True ROI)</span>
+              <span className="tile-label">سود کل روی سرمایهٔ درگیر این دارایی</span>
               <span
                 className="tile-val"
                 style={{ color: item.totalProfit >= 0 ? "#059669" : "#dc2626" }}
@@ -3263,7 +3427,7 @@ function AssetDetailChartVisualizer({
                 {item.totalProfit >= 0 ? "+" : ""}
                 {money(item.totalProfit)} ({item.capitalRoi >= 0 ? "+" : ""}{item.capitalRoi.toFixed(1)}٪)
               </span>
-              <small>سود خالص به نسبت آورده واقعی خارج از سبد</small>
+              <small>سود به نسبت بیشترین سرمایهٔ درگیر؛ این عدد سرمایهٔ اولیهٔ کل سبد نیست.</small>
             </div>
           </div>
 
@@ -3271,7 +3435,7 @@ function AssetDetailChartVisualizer({
             <div style={{ marginTop: "12px", padding: "10px 14px", background: "#fef3c7", border: "1px solid #fde68a", borderRadius: "10px", display: "flex", alignItems: "center", gap: "10px" }}>
               <ShieldCheck size={20} style={{ color: "#d97706", flexShrink: 0 }} />
               <div style={{ fontSize: "12px", color: "#92400e" }}>
-                <b>پوزیشن بدون ریسک (Free-Ride):</b> مجموع فروش‌های این دارایی ({money(totalSellAmount)}) از کل هزینه‌های خرید ({money(totalBuyAmount)}) بیشتر بوده است. اصل سرمایه اولیه کاملاً نقد شده و موجودی فعلی تماماً سود است.
+                <b>پوزیشن بدون ریسک (Free-Ride):</b> مجموع فروش‌های این دارایی ({money(totalSellAmount)}) از کل هزینه‌های خرید ({money(totalBuyAmount)}) بیشتر بوده است. هزینهٔ خریدها با فروش‌ها بازگشته است؛ این شاخص دربارهٔ همین دارایی است، نه پول اولیهٔ کل سبد.
               </div>
             </div>
           )}
@@ -3279,7 +3443,7 @@ function AssetDetailChartVisualizer({
           <div className="capital-bars-comparison">
             <div className="capital-bar-item">
               <div className="bar-header">
-                <span>۱. آورده اولیه از جیب (بدون چرخش مجدد):</span>
+                <span>۱. بیشترین سرمایهٔ درگیر در این دارایی:</span>
                 <b style={{ color: "#0369a1" }}>{money(item.freshCapital)}</b>
               </div>
               <div className="capital-track">
@@ -3312,7 +3476,7 @@ function AssetDetailChartVisualizer({
               <div className="bar-header">
                 <span>۳. خروجی و ارزش کل (فروش‌ها + ارزش روز موجودی):</span>
                 <b style={{ color: totalOutflow >= (item.freshCapital || 1) ? "#059669" : "#dc2626" }}>
-                  {money(totalOutflow)} ({item.capitalRoi >= 0 ? "+" : ""}{item.capitalRoi.toFixed(1)}٪ نسبت به آورده اولیه)
+                  {money(totalOutflow)} ({item.capitalRoi >= 0 ? "+" : ""}{item.capitalRoi.toFixed(1)}٪ نسبت به سرمایهٔ درگیر)
                 </b>
               </div>
               <div className="capital-track">
@@ -3412,6 +3576,7 @@ function AssetPerformanceDetailRow({
         sellTxs,
         avgBuyPrice,
         currentPrice,
+        data ?? { assets: [asset], transactions: txs, stockOrders: [] },
         totalDividends
       );
       if (ok) {
@@ -3550,7 +3715,7 @@ function AssetPerformanceDetailRow({
 
               <div className="kpi-mini-grid cols-2" style={{ marginBottom: "10px", background: "rgba(59, 130, 246, 0.05)", padding: "8px 10px", borderRadius: "8px", border: "1px dashed rgba(59, 130, 246, 0.2)" }}>
                 <div>
-                  <span style={{ fontSize: "11px", color: "#0369a1", fontWeight: 600, display: "block" }}>آورده اولیه واقعی از جیب:</span>
+                  <span style={{ fontSize: "11px", color: "#0369a1", fontWeight: 600, display: "block" }}>بیشترین سرمایهٔ درگیر در این دارایی:</span>
                   <b style={{ color: "#0369a1", fontSize: "13px" }}>{money(item.freshCapital)}</b>
                   <small style={{ fontSize: "10px", color: "var(--muted)", display: "block" }}>حداکثر پول نو درگیر (بدون چرخش مجدد)</small>
                 </div>
@@ -3719,20 +3884,20 @@ function AssetPerformanceDetailRow({
               <div className="kpi-mini-stat" style={{ background: item.capitalRoi >= 0 ? "rgba(16, 185, 129, 0.08)" : "rgba(239, 68, 68, 0.08)", marginTop: "8px", border: `1px solid ${item.capitalRoi >= 0 ? "rgba(16, 185, 129, 0.2)" : "rgba(239, 68, 68, 0.2)"}` }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <span style={{ color: item.capitalRoi >= 0 ? "#059669" : "#dc2626", fontWeight: 700, fontSize: "11.5px" }}>
-                    بازدهی واقعی روی آورده اولیه (True ROI):
+                    نسبت سود به بیشترین سرمایهٔ درگیر:
                   </span>
                   <b className={item.capitalRoi >= 0 ? "positive-text" : "negative-text"} style={{ direction: "ltr", fontSize: "13px" }}>
                     {item.capitalRoi >= 0 ? "+" : ""}{item.capitalRoi.toFixed(1)}٪
                   </b>
                 </div>
                 <small style={{ display: "block", fontSize: "10px", color: "var(--muted)", marginTop: "2px" }}>
-                  سود کل به نسبت حداکثر پول نقدی که از جیب خارج شده ({money(item.freshCapital)})
+                  نسبت سود کل به بیشترین سرمایهٔ درگیر در این دارایی ({money(item.freshCapital)})؛ برای آوردهٔ واقعی کل سبد، بخش گزارش سرمایه را ببینید.
                 </small>
               </div>
 
               {item.isRiskFree && (
                 <div style={{ marginTop: "8px", padding: "6px 8px", background: "#fef3c7", border: "1px solid #fde68a", borderRadius: "6px", fontSize: "11px", color: "#92400e" }}>
-                  🛡️ <b>پوزیشن بدون ریسک (Free-Ride):</b> اصل سرمایه اولیه با فروش‌ها نقد شده و موجودی فعلی سود خالص است.
+                  🛡️ <b>فروش بیشتر از کل خرید این دارایی:</b> این وضعیت به‌تنهایی به معنی بازیابی پول اولیهٔ کل سبد نیست.
                 </div>
               )}
 
@@ -3969,7 +4134,7 @@ function AssetPerformanceDetailRow({
                             )}
                           </td>
                           <td style={{ color: "var(--muted)", fontSize: "11px", whiteSpace: "pre-line", lineHeight: 1.4 }}>
-                            {tx.notes || "—"}
+                            {data ? describeTransactionNote(data, tx) || "—" : tx.notes || "—"}
                           </td>
                         </tr>
                       );
@@ -3997,6 +4162,9 @@ export function ReportsView({
   totalValue,
   totalProfit,
   segments,
+  capitalReport,
+  onResolveIssue,
+  onRegisterCapital,
   onPdf,
   onShowTransactions,
   onViewAssetTransactions,
@@ -4007,9 +4175,12 @@ export function ReportsView({
   totalValue: number;
   totalProfit: number;
   segments: Array<{ label: string; value: number; color: string }>;
+  capitalReport: CapitalReport;
+  onResolveIssue: (target: AuditTarget) => void;
+  onRegisterCapital: (accountId?: string, beforeDate?: string) => void;
   onPdf?: () => void;
-  onShowTransactions?: () => void;
-  onViewAssetTransactions?: (asset: Asset) => void;
+  onShowTransactions: () => void;
+  onViewAssetTransactions?: (asset: Asset, focusTransactionId?: string) => void;
 }) {
   const [timelineRange, setTimelineRange] = useState<ChartTimeRange>("all");
   const [allocationRange, setAllocationRange] = useState<ChartTimeRange>("all");
@@ -4087,6 +4258,8 @@ export function ReportsView({
     return { segments: historic.segments, total: historic.totalValue };
   }, [data, segments, totalValue, allocationRange, allocationAtStart]);
 
+  const allocationBase = segments.reduce((sum, item) => sum + Math.max(0, item.value), 0);
+
   const sortedByProfit = useMemo(() => {
     return [...metrics].sort((a, b) => b.totalProfit - a.totalProfit);
   }, [metrics]);
@@ -4153,30 +4326,33 @@ export function ReportsView({
 
   return (
     <div className="view-container">
-      {onPdf && (
-        <div className="view-toolbar" style={{ marginBottom: "16px" }}>
-          <div>
-            <h3 style={{ fontSize: "17px", margin: "0 0 4px", fontWeight: 700 }}>
-              گزارش جامع تحلیلی و عملکرد پورتفوی
-            </h3>
-            <small style={{ color: "var(--muted)" }}>
-              خلاصه بازدهی تاریخی، ترکیب سبد دارایی‌ها و جریان‌های مالی ماهانه
-            </small>
-          </div>
-          <div className="toolbar-actions">
-            {onShowTransactions && (
-              <button type="button" className="button secondary" onClick={onShowTransactions}>
-                دفترچه معاملات
-              </button>
-            )}
-            <button type="button" className="button secondary" onClick={onPdf}>
-              <Printer size={16} /> چاپ و دریافت PDF گزارش
-            </button>
-          </div>
-        </div>
-      )}
+      <CapitalHealthPanel
+        report={capitalReport}
+        data={data}
+        onResolve={onResolveIssue}
+        onRegisterCapital={onRegisterCapital}
+        onShowTransactions={onShowTransactions}
+        onViewAccount={data && onViewAssetTransactions ? (accountId, focusTransactionId) => {
+          const account = data.assets.find((asset) => asset.id === accountId);
+          if (account) onViewAssetTransactions(account, focusTransactionId);
+        } : undefined}
+      />
 
-      <section className="hero-metrics">
+      <details className="capital-technical reports-optional" open={capitalReport.isReliable}>
+        <summary>بعد از تطبیق: نمایش نمودارها و جزئیات عملکرد {capitalReport.isReliable ? "" : "(اعداد خام و تأییدنشده)"}</summary>
+        {onPdf && (
+          <div className="view-toolbar">
+            <div>
+              <h3 style={{ fontSize: "17px", margin: "0 0 4px", fontWeight: 700 }}>گزارش جامع تحلیلی و عملکرد پورتفوی</h3>
+              <small style={{ color: "var(--muted)" }}>خلاصه بازدهی تاریخی، ترکیب سبد دارایی‌ها و جریان‌های مالی ماهانه</small>
+            </div>
+            <div className="toolbar-actions">
+              <button type="button" className="button secondary" onClick={onShowTransactions}>دفترچه معاملات</button>
+              <button type="button" className="button secondary" onClick={onPdf}><Printer size={16} /> چاپ و دریافت PDF گزارش</button>
+            </div>
+          </div>
+        )}
+        <section className="hero-metrics">
         <article className="hero-card">
           <div className="card-label-with-info">
             <span className="card-label">ارزش کل سبد سرمایه‌گذاری</span>
@@ -4196,13 +4372,13 @@ export function ReportsView({
             <InfoButton
               title="کل سود و زیان تاریخی"
               formula="سود کل = سود محقق‌شده فروش‌ها + سود جاری دارایی‌ها + سود تقسیمی مجامع + سود واریزی حامی"
-              description="حاصل خالص عملکرد مالی شما در بازار سرمایه از اولین تراکنش تا لحظه کنونی."
+              description="سود محاسباتی بر اساس داده‌های موجود؛ تا زمانی که گزارش سرمایه هشدار دارد، قابل اتکا به‌عنوان سود نهایی نیست."
             />
           </div>
-          <h2 className={totalProfit >= 0 ? "positive-text" : "negative-text"}>
-            {signedMoney(totalProfit)}
+          <h2 className={capitalReport.isReliable ? (totalProfit >= 0 ? "positive-text" : "negative-text") : ""}>
+            {capitalReport.isReliable ? signedMoney(totalProfit) : "هنوز تأیید نشده"}
           </h2>
-          <p className="card-sub">شامل رشد دارایی‌ها، سود فروش و سود مجامع</p>
+          <p className="card-sub">{capitalReport.isReliable ? "شامل رشد دارایی‌ها، فروش و مجامع؛ نیازمند تأیید با اسناد." : "ابتدا دو گام بالا را انجام دهید؛ عدد خام در جزئیات محاسبه موجود است."}</p>
         </article>
 
         <article className="hero-card">
@@ -4245,11 +4421,11 @@ export function ReportsView({
                 <InfoButton
                   title="نمودار روند سود و زیان تاریخی"
                   formula="نمایش تجمعی خالص سود (بدون احتساب اصل آورده و واریز نقدی) در مقاطع تاریخی | تغییر سود بازه = سود پایان بازه - سود شروع بازه"
-                  description="ارزیابی میزان شتاب سودآوری سرمایه و رفتار پورتفو در روندهای صعودی و نزولی بازار."
+                  description="روند سود محاسباتی بر اساس داده‌های هر تاریخ؛ برای کپی‌ترید بدون مانده‌های تاریخی، گذشته برآوردی است. هشدارهای تراز سرمایه را جدا بررسی کنید."
                 />
               </div>
               <p>
-                نمودار تغییرات سود تحقق‌یافته و جاری پورتفوی
+                سود محاسباتی تاریخی؛ بدون ماندهٔ گذشتهٔ کپی‌ترید، مسیر آن تقریبی است
                 {profitDelta && timelineRange !== "all" && (
                   <span className="chart-delta-badge">
                     · تغییر سود در این بازه:{" "}
@@ -4336,18 +4512,18 @@ export function ReportsView({
           <div className="panel-head">
             <div>
               <div className="title-with-info">
-                <h3 style={{ margin: 0 }}>جریان نقدینگی و سودآوری ماهانه (تقویم شمسی)</h3>
+                <h3 style={{ margin: 0 }}>گردش تراکنش‌های ماهانه (تقویم شمسی)</h3>
                 <InfoButton
-                  title="جریان نقدینگی و سودآوری ماهانه"
-                  formula="خالص جریان مالی = مجموع خرید و واریزها - مجموع فروش و برداشت‌ها + سودهای نقدی | ته‌برگ = تراز تجمعی کل دوره‌ها"
-                  description="جدول تقویمی تفکیک ماه به ماه ورود نقدینگی، خروج نقدینگی، سودهای مجامع و صندوق حامی."
+                  title="گردش تراکنش‌های ماهانه"
+                  formula="خالص گردش ثبت‌شده = خرید/واریز − فروش/برداشت + سود ثبت‌شده؛ این عدد سرمایهٔ اولیه یا سود خالص نیست."
+                  description="جدول فعالیت ماهانه شامل معاملات و انتقال‌های داخلی است؛ برای آوردهٔ ثبت‌شده و وضعیت مغایرت‌ها، به بخش گزارش سرمایه در بالای صفحه مراجعه کنید."
                   details={[
-                    "این جدول تصویر دقیقی از پس‌انداز و سرمایه‌گذاری ماهانه شما ارائه می‌دهد.",
-                    "ماهیت تقویمی بر اساس تاریخ خورشیدی (شمسی) دسته‌بندی شده است."
+                    "یک جابه‌جایی بین حساب‌ها در این جدول دو ردیف دارد و پول تازه‌ای به سبد اضافه نمی‌کند.",
+                    "ماهیت تقویمی بر اساس تاریخ خورشیدی دسته‌بندی شده است."
                   ]}
                 />
               </div>
-              <p>تفکیک مبالغ واریز/خرید، برداشت/فروش و سودهای دریافتی در هر ماه</p>
+              <p>گردش ناخالص خرید/فروش و انتقال‌ها؛ این جدول مبنای محاسبهٔ سرمایه نیست.</p>
             </div>
             <span className="tag">{monthlyFlows.length} ماه ثبت‌شده</span>
           </div>
@@ -4461,7 +4637,7 @@ export function ReportsView({
             <h3 style={{ margin: 0 }}>رتبه‌بندی عملکرد تمام دارایی‌ها</h3>
             <InfoButton
               title="جدول رتبه‌بندی عملکرد تمام دارایی‌ها"
-              formula="سهم از پورتفو = (ارزش روز ÷ ارزش کل) × ۱۰۰ | مجموع سود = سود محقق‌شده فروش‌ها + سود جاری | بازدهی = (مجموع سود ÷ بهای تمام‌شده) × ۱۰۰"
+              formula="سهم از پورتفو = (ارزش مثبت دارایی ÷ مجموع دارایی‌های مثبت) × ۱۰۰؛ ماندهٔ منفی از خالص ارزش کسر می‌شود | بازدهی این جدول نسبت سود به بهای تمام‌شده است، نه بازده پول اولیه."
               description="مقایسه عملکرد و بازدهی تمام دارایی‌ها به تفکیک بهای تمام‌شده، ارزش روز، سود تحقق‌یافته و جاری."
               details={[
                 "بهای تمام‌شده (Cost Basis): کل مبلغ پرداخت‌شده برای خرید سهم یا دارایی موجود.",
@@ -4536,7 +4712,7 @@ export function ReportsView({
             </thead>
             <tbody>
               {sortedRankingMetrics.map((item) => {
-                const share = totalValue > 0 ? (item.marketValue / totalValue) * 100 : 0;
+                const share = allocationBase > 0 ? (Math.max(0, item.marketValue) / allocationBase) * 100 : 0;
                 const isExpanded = Boolean(expandedAssetIds[item.asset.id]);
                 return (
                   <Fragment key={item.asset.id}>
@@ -4616,6 +4792,7 @@ export function ReportsView({
           </table>
         </div>
       </section>
+      </details>
     </div>
   );
 }
@@ -4643,7 +4820,7 @@ export function BackupView({
           <h2 style={{ margin: 0 }}>مدیریت نسخه پشتیبان و داده‌های پورتفوی شما</h2>
           <InfoButton
             title="مدیریت داده‌ها و نسخه پشتیبان پورتفو"
-            formula="ذخیره‌سازی رمزنگاری‌شده محلی در مرورگر (LocalStorage) بدون ارسال داده‌های محرمانه مالی به سرورهای ناشناس"
+            formula="داده‌های پرتفوی در localStorage همین مرورگر نگهداری می‌شوند؛ این حافظه رمزگذاری‌شده نیست."
             description="حفظ امنیت، استقلال و دسترسی همیشگی به داده‌های سبد سرمایه‌گذاری با ابزارهای پشتیبان‌گیری و بازیابی."
             details={[
               "فایل پشتیبان JSON شامل تمامی دارایی‌ها، تاریخچه قیمت‌ها، سفارش‌های سهام، سود مجامع و فایل‌های پیوست است.",
@@ -4652,9 +4829,9 @@ export function BackupView({
           />
         </div>
         <p>
-          تمام داده‌های پورتفوی شما به‌صورت کاملاً آفلاین و امن روی حافظهٔ مرورگر شما ذخیره
-          می‌شود. می‌توانید در هر زمان نسخه پشتیبان کامل تهیه کرده یا به کامپیوتر دیگری منتقل
-          کنید.
+          فایل پشتیبان در مرورگر خوانده می‌شود و داده‌های پورتفو در حافظهٔ محلی همین مرورگر
+          (LocalStorage، بدون رمزگذاری) نگهداری می‌شوند؛ فایل JSON و دستگاه خود را ایمن نگه دارید.
+          برای انتقال به دستگاه دیگر، خروجی JSON بگیرید و آن را در مرورگر مقصد بازیابی کنید.
         </p>
         <div style={{ display: "flex", gap: "16px", justifyContent: "center", marginTop: "16px", flexWrap: "wrap" }}>
           <span className="pill-badge neutral">تعداد دارایی‌ها: {nf.format(data.assets.length)}</span>
@@ -4687,11 +4864,11 @@ export function BackupView({
             <h3 style={{ margin: 0 }}>بازیابی اطلاعات (Restore)</h3>
             <InfoButton
               title="بازیابی اطلاعات از فایل پشتیبان"
-              formula="خواندن داده‌های فایل JSON و جایگزینی یا تلفیق ایمن با پورتفوی جاری"
+              formula="خواندن JSON در همین مرورگر و جایگزینی کامل پرتفوی جاری پس از تأیید شما"
               description="بازگردانی پورتفو در صورت تعویض سیستم، پاک شدن حافظه مرورگر یا استفاده در دستگاه دیگر."
             />
           </div>
-          <p>بارگذاری فایل پشتیبان قبلی و بازگردانی اطلاعات پورتفو.</p>
+          <p>جایگزینی داده‌های فعلی مرورگر با فایل JSON انتخابی، پس از تأیید شما. اگر دادهٔ فعلی مهم است ابتدا از آن خروجی بگیرید.</p>
           <button type="button" className="button secondary" onClick={onImport}>
             <Upload size={18} /> انتخاب فایل پشتیبان
           </button>
@@ -4734,14 +4911,14 @@ export function BackupView({
         <div className="panel-head">
           <div>
             <div className="title-with-info">
-              <h3 style={{ color: "#dc2626", margin: 0 }}>پاک‌سازی داده‌های نمونه و شروع مجدد</h3>
+              <h3 style={{ color: "#dc2626", margin: 0 }}>پاک‌سازی کل داده‌های این مرورگر و شروع مجدد</h3>
               <InfoButton
                 title="پاک‌سازی کامل و بازنشانی پورتفو"
                 formula="حذف کلیدهای محلی پورتفو از حافظه LocalStorage و ساخت یک ساختار داده خالی اولیه"
                 description="عملیات غیرقابل بازگشت جهت صفر کردن سیستم برای ورود اطلاعات دارایی‌های واقعی خود کاربر."
               />
             </div>
-            <p>تمام اطلاعات نمونه پاک شده و یک پرتفوی خالی و آماده برای ورود اطلاعات شما ایجاد می‌شود.</p>
+            <p>تمام تراکنش‌ها، دارایی‌ها و قیمت‌های فعلی حذف می‌شوند. پیش از شروع تازه، نسخهٔ پشتیبان بگیرید.</p>
           </div>
           <button type="button" className="button danger-button" onClick={onClear}>
             <Trash2 size={16} /> پاک‌سازی و شروع تازه

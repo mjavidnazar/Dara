@@ -22,6 +22,7 @@ export interface Asset {
   annualInterestRate?: number;
   copyUsdBalance?: number;
   copyUsdRate?: number;
+  lastValuationAt?: string;
   createdAt: string;
   isDepositCertificate?: boolean;
   depositSymbol?: string;
@@ -48,7 +49,12 @@ export interface Transaction {
   attachmentIds: string[];
   destinationAssetId?: string;
   sourceAssetId?: string;
-  kind?: "trade" | "interest" | "balance_adjustment" | "transfer" | "fee";
+  // External cash flows are distinct from trades, internal transfers and balance corrections.
+  // Existing unclassified records remain unclassified until the owner reviews them.
+  kind?: "trade" | "interest" | "balance_adjustment" | "transfer" | "fee"
+    | "opening_capital" | "capital_in" | "capital_out" | "stock_dividend";
+  linkedTransactionId?: string;
+  stockDividendId?: string;
   createdAt: string;
 }
 
@@ -87,6 +93,8 @@ export interface StockDividend {
   amount: number;
   date: string;
   status: "pending" | "paid";
+  // Explicitly confirmed receipt outside the accounts tracked in this portfolio.
+  receivedOutside?: boolean;
   notes?: string;
 }
 
@@ -149,6 +157,60 @@ export interface StockSymbolMetric {
   freshCapital: number;
   capitalRoi: number;
   isRiskFree: boolean;
+}
+
+// Preview rows produced by the commodity certificate statement parser.
+export interface DepositCertTradeItem {
+  id: string;
+  date: string;
+  jalaliDate: string;
+  symbol: string;
+  type: "buy" | "sell";
+  grossAmount: number;
+  commission: number;
+  netAmount: number;
+  quantity: number;
+  unitPrice: number;
+  assetId?: string;
+  assetName?: string;
+  status: "new" | "duplicate";
+  sourceKey: string;
+  selected: boolean;
+  tradesCount: number;
+  individualDocNos: string[];
+  feeBreakdown: Record<string, number>;
+}
+
+export interface DepositCertStorageFeeItem {
+  id: string;
+  date: string;
+  jalaliDate: string;
+  symbol: string;
+  amount: number;
+  docNo: string;
+  assetId?: string;
+  assetName?: string;
+  status: "new" | "duplicate";
+  selected: boolean;
+  applyAs: "cost_basis";
+}
+
+export interface DepositCertCashTransferItem {
+  id: string;
+  date: string;
+  jalaliDate: string;
+  direction: "deposit" | "withdraw";
+  amount: number;
+  docNo: string;
+  selected: boolean;
+}
+
+export interface DepositCertImportResult {
+  trades: DepositCertTradeItem[];
+  storageFees: DepositCertStorageFeeItem[];
+  cashTransfers: DepositCertCashTransferItem[];
+  accountName?: string;
+  nationalCode?: string;
 }
 
 export interface BourseSummary {

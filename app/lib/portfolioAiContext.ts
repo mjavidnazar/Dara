@@ -5,6 +5,7 @@ import type {
   StockSymbolMetric,
 } from "./types";
 import { money, percent, toPersianDate, nf } from "./portfolio";
+import { describeTransactionNote } from "./transactionDescriptions";
 
 export function buildPortfolioAiContext({
   data,
@@ -82,7 +83,7 @@ export function buildPortfolioAiContext({
     .map((tx) => {
       const asset = data.assets.find((a) => a.id === tx.assetId);
       const typeLabel = tx.type === "buy" ? "خرید" : "فروش";
-      return `- تاریخ ${toPersianDate(tx.date)} | ${typeLabel} ${asset?.name || "دارایی"} | مقدار: ${nf.format(tx.quantity)} | قیمت واحد: ${money(tx.unitPrice)} | مبلغ کل: ${money(tx.totalPrice)}${tx.notes ? ` (یادداشت: ${tx.notes})` : ""}`;
+      return `- تاریخ ${toPersianDate(tx.date)} | ${typeLabel} ${asset?.name || "دارایی"} | مقدار: ${nf.format(tx.quantity)} | قیمت واحد: ${money(tx.unitPrice)} | مبلغ کل: ${money(tx.totalPrice)}${tx.notes ? ` (یادداشت: ${describeTransactionNote(data, tx)})` : ""}`;
     });
 
   return `[خلاصه کلی پورتفوی]

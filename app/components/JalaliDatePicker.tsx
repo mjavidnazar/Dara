@@ -3,12 +3,12 @@
 import { useMemo, useState } from "react";
 import { jalaaliMonthLength, toGregorian, toJalaali } from "jalaali-js";
 import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
-import { nf, persianDatePart } from "../lib/portfolio";
+import { nf, persianDatePart, validIsoDate } from "../lib/portfolio";
 
 const week = ["ش", "ی", "د", "س", "چ", "پ", "ج"];
 
 function partsFromIso(value: string) {
-  const date = value ? new Date(`${value}T12:00:00`) : new Date();
+  const date = validIsoDate(value) ? new Date(`${value}T12:00:00`) : new Date();
   const j = toJalaali(date);
   return { jy: j.jy, jm: j.jm, jd: j.jd };
 }
@@ -18,8 +18,8 @@ function isoFromJalali(jy: number, jm: number, jd: number) {
   return `${g.gy}-${String(g.gm).padStart(2, "0")}-${String(g.gd).padStart(2, "0")}`;
 }
 
-export function JalaliDatePicker({ value, onChange, allowEmpty = false }: { value: string; onChange: (value: string) => void; allowEmpty?: boolean }) {
-  const initial = partsFromIso(value);
+export function JalaliDatePicker({ value, onChange, allowEmpty = false, referenceDate, maxDate }: { value: string; onChange: (value: string) => void; allowEmpty?: boolean; referenceDate?: string; maxDate?: string }) {
+  const initial = partsFromIso(value || referenceDate || "");
   const [open, setOpen] = useState(false);
   const [view, setView] = useState({ jy: initial.jy, jm: initial.jm });
   const selected = partsFromIso(value);
@@ -37,7 +37,9 @@ export function JalaliDatePicker({ value, onChange, allowEmpty = false }: { valu
     if (jm < 1) { jm = 12; jy -= 1; }
     setView({ jy, jm });
   };
-  const display = value ? `${persianDatePart(selected.jy)}/${persianDatePart(selected.jm, 2)}/${persianDatePart(selected.jd, 2)}` : "انتخاب تاریخ";
+  const invalidValue = Boolean(value && !validIsoDate(value));
+  const display = invalidValue ? "تاریخ نامعتبر؛ اصلاح کنید" : value
+    ? `${persianDatePart(selected.jy)}/${persianDatePart(selected.jm, 2)}/${persianDatePart(selected.jd, 2)}` : "انتخاب تاریخ";
 
   return (
     <div className="date-picker">
@@ -60,7 +62,8 @@ export function JalaliDatePicker({ value, onChange, allowEmpty = false }: { valu
                 <button
                   type="button"
                   key={index}
-                  className={selected.jy === view.jy && selected.jm === view.jm && selected.jd === day ? "selected" : ""}
+                  className={value && selected.jy === view.jy && selected.jm === view.jm && selected.jd === day ? "selected" : ""}
+                  disabled={Boolean(maxDate && isoFromJalali(view.jy, view.jm, day) > maxDate)}
                   onClick={() => { onChange(isoFromJalali(view.jy, view.jm, day)); setOpen(false); }}
                 >
                   {nf.format(day)}
@@ -68,9 +71,11 @@ export function JalaliDatePicker({ value, onChange, allowEmpty = false }: { valu
               ) : <span key={index} />)}
             </div>
             <div style={{ display: "flex", gap: "6px", marginTop: "7px" }}>
-              <button type="button" className="today-button" style={{ flex: 1, marginTop: 0 }} onClick={() => { onChange(new Date().toISOString().slice(0, 10)); setOpen(false); }}>
-                امروز
-              </button>
+              {(!maxDate || new Date().toISOString().slice(0, 10) <= maxDate) && (
+                <button type="button" className="today-button" style={{ flex: 1, marginTop: 0 }} onClick={() => { onChange(new Date().toISOString().slice(0, 10)); setOpen(false); }}>
+                  امروز
+                </button>
+              )}
               {allowEmpty && (
                 <button type="button" className="today-button" style={{ flex: 1, marginTop: 0, color: "#ca4545", background: "#fef2f2" }} onClick={() => { onChange(""); setOpen(false); }}>
                   پاک‌کردن

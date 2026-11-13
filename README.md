@@ -1,98 +1,32 @@
-# vinext-starter
+# دارا (Dara)
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+داشبورد فارسی مدیریت پرتفوی و گردش حساب، با گزارش تطبیق سرمایه و امکان بررسی و ویرایش ردیف‌های نیازمند اصلاح. داده‌های پرتفوی در `localStorage` همان مرورگر ذخیره می‌شوند؛ این حافظه **رمزگذاری‌شده نیست** و جای نسخهٔ پشتیبان را نمی‌گیرد.
 
-## Prerequisites
+## دانلود نسخه
 
-- Node.js `>=22.13.0`
+1. صفحهٔ [Releases دارا](https://github.com/mjavidnazar/Dara/releases) را باز کنید و نسخهٔ موردنظر را انتخاب کنید.
+2. در قسمت **Assets**، روی **Source code (zip)** بزنید و فایل را از حالت فشرده خارج کنید.
+3. این ZIP **کد منبع** است، نه برنامهٔ نصب‌شدنی یا فایل اجرایی مستقل. داده‌ها و نسخه‌های پشتیبان شخصی شما داخل آن نیستند.
 
-## Quick Start
+## اجرا روی رایانه
+
+به [Node.js](https://nodejs.org/) نسخهٔ **22.13 یا جدیدتر** و npm نیاز دارید. در ترمینال، داخل پوشهٔ استخراج‌شده اجرا کنید:
 
 ```bash
-npm install
+npm ci
 npm run dev
+```
+
+سپس `http://localhost:3000` را در مرورگر همان رایانه باز کنید. برای متوقف‌کردن برنامه در ترمینال `Ctrl+C` را بزنید. با `npm run build` می‌توانید ساخت نسخهٔ تولیدی را بررسی کنید. این پروژه یک برنامهٔ Next.js است؛ برای اجرای تولیدی از خروجی `standalone` همراه فایل‌های `public/` و `.next/static/` استفاده کنید.
+
+> اگر فایل JSON پشتیبان خود را دارید، آن را **فقط در خود برنامه** از بخش «پشتیبان‌گیری» و پس از تهیهٔ نسخه از داده‌های فعلی بازیابی کنید. فایل پشتیبان شخصی، `.env` یا اطلاعات مالی را در مخزن عمومی GitHub بارگذاری نکنید. برچسب‌های خطا فقط برای بررسی‌اند و داده‌ای را خودکار اصلاح نمی‌کنند.
+
+## توسعه و کنترل
+
+```bash
+npm test
+npm run lint
 npm run build
 ```
 
-This starter does not use `wrangler.jsonc`.
-
-## Included Shape
-
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
-
-## Workspace Auth Headers
-
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
-```
-
-## Optional Dispatch-Owned ChatGPT Sign-In
-
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
-
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
-
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
-
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
-
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
-
-## Useful Commands
-
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
-
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+نسخهٔ منتشرشده را از صفحهٔ Releases بگیرید؛ گزینهٔ **Code → Download ZIP** در صفحهٔ اصلی مخزن ممکن است مربوط به شاخهٔ `main` و نسخه‌ای متفاوت باشد.

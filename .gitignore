@@ -1,0 +1,7 @@
+node_modules/
+.next/
+*.tsbuildinfo
+.env*
+!.env.example
+# Personal portfolio backups, diagnostics and local-only settings (never bundle/commit)
+.private/
