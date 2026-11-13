@@ -52,6 +52,8 @@ export function sanitizePortfolioData(data: unknown): PortfolioData | null {
             attachmentIds: Array.isArray(tx.attachmentIds) ? tx.attachmentIds : [],
           }))
       : [],
+    // Quote order is significant: the last entry/edit for a given date wins.
+    // Do not sort or deduplicate when loading a local state or JSON backup.
     prices: Array.isArray(raw.prices)
       ? raw.prices
           .filter((p: any) => p && typeof p === "object")

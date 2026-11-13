@@ -383,7 +383,7 @@ test("nonfinite asset rates and copy balances cannot poison portfolio totals", (
   assert.equal(report.isReliable, false);
 });
 
-test("conflicting same-day asset and stock prices are flagged, never silently chosen", () => {
+test("different same-day quotes are accepted; invalid prices and dates still need correction", () => {
   const d = data([bank, gold], [tx("opening", bank.id, "buy", 100, { kind: "opening_capital" })]);
   d.prices = [
     { id: "first", assetId: gold.id, date: "2026-11-10", price: 70 },
@@ -392,18 +392,24 @@ test("conflicting same-day asset and stock prices are flagged, never silently ch
   d.stockPrices = [
     { id: "stock-first", symbol: "آزمایش", date: "2026-11-10", price: 50 },
     { id: "stock-second", symbol: "آزمایش", date: "2026-11-10", price: 55 },
+  ];
+  assert.equal(evaluate(d).isReliable, true, "different same-day quotes alone are not an issue");
+
+  d.prices.push(
+    { id: "asset-invalid", assetId: gold.id, date: "2026-10-32", price: 60 },
+    { id: "asset-zero", assetId: gold.id, date: "2026-11-10", price: 0 },
+  );
+  d.stockPrices.push(
     { id: "stock-invalid", symbol: "آزمایش", date: "2026-10-32", price: 60 },
     { id: "stock-future", symbol: "آزمایش", date: "2026-12-01", price: 60 },
     { id: "stock-zero", symbol: "", date: "2026-11-10", price: 0 },
-  ];
+  );
   const report = evaluate(d);
-  assert.ok(report.issues.some((issue) => issue.id === "quote-conflict-second" && issue.target.type === "price" && issue.target.recordId === "second"));
-  assert.ok(report.issues.some((issue) => issue.id === "stock-quote-conflict-stock-second" && issue.target.type === "stockPrice" && issue.target.id === "stock-second"));
+  assert.ok(!report.issues.some((issue) => issue.id.includes("quote-conflict")));
+  assert.ok(report.issues.some((issue) => issue.id === "quote-date-asset-invalid" && issue.target.type === "price" && issue.target.recordId === "asset-invalid"));
+  assert.ok(report.issues.some((issue) => issue.id === "quote-value-asset-zero" && issue.severity === "error"));
   assert.ok(report.issues.some((issue) => issue.id === "stock-quote-date-stock-invalid" && issue.target.type === "stockPrice"));
   assert.ok(report.issues.some((issue) => issue.id === "stock-quote-date-stock-future"));
   assert.ok(report.issues.some((issue) => issue.id === "stock-quote-value-stock-zero" && issue.severity === "error"));
   assert.equal(report.isReliable, false);
-  d.prices[1].price = 70;
-  d.stockPrices = d.stockPrices.slice(0, 2).map((price) => ({ ...price, price: 50 }));
-  assert.ok(!evaluate(d).issues.some((issue) => issue.id.includes("quote-conflict")));
 });

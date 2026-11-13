@@ -1006,14 +1006,16 @@ export function PriceModalBulk({
   });
   const [showAllHistory, setShowAllHistory] = useState(false);
 
-  const sortedHistory = [...history].sort((a, b) =>
-    Number(b.id === focusHistoryId) - Number(a.id === focusHistoryId) || (b.date || "").localeCompare(a.date || ""));
+  // Within a date, the last entry in the saved array is the effective quote.
+  const sortedHistory = [...history].reverse().sort((a, b) =>
+    Number(Boolean(focusHistoryId && b.id === focusHistoryId)) - Number(Boolean(focusHistoryId && a.id === focusHistoryId)) ||
+    (b.date || "").localeCompare(a.date || ""));
   const recent = showAllHistory ? sortedHistory : sortedHistory.slice(0, 20);
 
   return (
     <Modal
       title="به‌روزرسانی و تاریخچه قیمت‌ها"
-      subtitle="قیمت جدید دارایی‌ها را ثبت کنید یا رکوردهای قبلی را ویرایش نمایید."
+      subtitle="در هر روز، آخرین قیمت ثبت‌شده یا ویرایش‌شده مبنای محاسبه است؛ قیمت‌های قبلی در تاریخچه باقی می‌مانند."
       onClose={onClose}
       wide
     >
@@ -1157,14 +1159,15 @@ export function StockPriceHistoryModal({
     return record ? { id: record.id, symbol: String(record.symbol ?? ""), date: String(record.date ?? ""), price: String(record.price ?? "") } : null;
   });
   const [showAll, setShowAll] = useState(false);
-  const ordered = [...history].sort((a, b) =>
-    Number(b.id === focusId) - Number(a.id === focusId) || String(b.date ?? "").localeCompare(String(a.date ?? "")));
+  const ordered = [...history].reverse().sort((a, b) =>
+    Number(Boolean(focusId && b.id === focusId)) - Number(Boolean(focusId && a.id === focusId)) ||
+    String(b.date ?? "").localeCompare(String(a.date ?? "")));
   const recent = showAll ? ordered : ordered.slice(0, 20);
   const canSave = Boolean(editing && editing.symbol.trim() && num(editing.price) > 0 &&
     validIsoDate(editing.date) && editing.date <= todayIso());
 
   return (
-    <Modal title="تاریخچهٔ قیمت سهام" subtitle="هر نرخ پایانی را با تاریخ و نماد واقعی آن تطبیق دهید؛ اصلاح رکورد، دادهٔ دیگری را تغییر نمی‌دهد." onClose={onClose} wide>
+    <Modal title="تاریخچهٔ قیمت سهام" subtitle="در هر روز آخرین قیمت ثبت‌شده یا ویرایش‌شده مبناست؛ نرخ‌های قبلی حفظ می‌شوند. تاریخ و نماد را با سند تطبیق دهید." onClose={onClose} wide>
       {editing && (
         <form className="modal-form" onSubmit={(event) => {
           event.preventDefault();

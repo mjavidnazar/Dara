@@ -149,6 +149,40 @@ export function isDepositCertificate(asset?: Asset): boolean {
   );
 }
 
+/**
+ * The newest *date* wins; for multiple quotes on that date, the last entry in
+ * the persisted history wins. New quotes are appended and edits are moved to
+ * the end, so this works for both new records and legacy backups without an
+ * entry timestamp. An older date never overrides a later date.
+ */
+function latestDatedPrice<T extends { date: string; price: number }>(
+  history: T[], asOf: string, matches: (entry: T) => boolean
+): T | undefined {
+  let latest: T | undefined;
+  for (const entry of history) {
+    if (!matches(entry) || !validIsoDate(entry.date) || entry.date > asOf ||
+        !Number.isFinite(entry.price) || entry.price <= 0) continue;
+    if (!latest || entry.date >= latest.date) latest = entry;
+  }
+  return latest;
+}
+
+export function latestAssetPrice(history: PriceHistory[], assetId: string, asOf = todayIso()): PriceHistory | undefined {
+  return latestDatedPrice(history, asOf, (entry) => entry.assetId === assetId);
+}
+
+export function latestStockPrice(history: StockPrice[], symbol: string, asOf = todayIso()): StockPrice | undefined {
+  const key = normalizeSymbol(symbol);
+  return key ? latestDatedPrice(history, asOf, (entry) => normalizeSymbol(entry.symbol) === key) : undefined;
+}
+
+// A copy-trading balance is a separate snapshot: an older dated quote must
+// not override a rate confirmed with a newer balance.
+export function copySnapshotRate(asset: Asset, latest?: PriceHistory): number {
+  return latest && (!asset.lastValuationAt || latest.date >= asset.lastValuationAt)
+    ? latest.price : (asset.copyUsdRate ?? asset.currentPrice);
+}
+
 export function isInterestTransaction(tx: Pick<Transaction, "type" | "kind" | "notes">) {
   if (tx.kind) return tx.kind === "interest";
   // Legacy imports had no kind. Only recognizable interest deposits retain the old treatment;
@@ -214,9 +248,8 @@ export function metricsAt(
       }
     }
 
-    const historicalPrice = prices
-      .filter((p) => p.assetId === asset.id && validIsoDate(p.date) && p.date <= asOf && Number.isFinite(p.price) && p.price > 0)
-      .sort((a, b) => (b.date || "").localeCompare(a.date || ""))[0]?.price;
+    const latestPrice = latestAssetPrice(prices, asset.id, asOf);
+    const historicalPrice = latestPrice?.price;
     const currentPrice = safeNumber(historicalPrice ?? asset.currentPrice);
 
     const netInvested = list.reduce(
@@ -227,6 +260,7 @@ export function metricsAt(
     let marketValue = 0;
     let unrealizedProfit = 0;
     let totalProfit = 0;
+    let displayPrice = currentPrice;
     let displayQuantity = Math.max(0, quantity);
 
     if (mode === "copy") {
@@ -239,8 +273,9 @@ export function metricsAt(
         ? safeNumber(asset.copyUsdBalance ?? quantity)
         : Math.max(0, quantity);
       const copyRate = useSnapshot
-        ? safeNumber(asset.copyUsdRate ?? currentPrice)
+        ? safeNumber(copySnapshotRate(asset, latestPrice))
         : safeNumber(historicalPrice ?? list[list.length - 1]?.unitPrice);
+      displayPrice = copyRate;
       displayQuantity = copyUsd;
       marketValue = copyUsd * copyRate;
       totalProfit = marketValue - Math.max(0, netInvested);
@@ -257,9 +292,7 @@ export function metricsAt(
             )
           )
         : 0;
-      const manualCorrection = prices
-        .filter((p) => p.assetId === asset.id && validIsoDate(p.date) && p.date <= asOf && Number.isFinite(p.price) && p.price > 0)
-        .sort((a, b) => (b.date || "").localeCompare(a.date || ""))[0];
+      const manualCorrection = latestPrice;
       const fixedBase =
         manualCorrection && manualCorrection.price >= Math.max(1, netInvested * 0.5)
           ? manualCorrection.price
@@ -343,7 +376,12 @@ export function metricsAt(
     }
 
     return {
-      asset,
+      // Show the quote actually used in valuation, even when a legacy backup's
+      // asset.currentPrice snapshot is older than its saved price history.
+      asset: mode === "copy"
+        ? { ...asset, currentPrice: displayPrice, copyUsdRate: displayPrice }
+        : mode !== "cash" && displayPrice !== asset.currentPrice
+          ? { ...asset, currentPrice: displayPrice } : asset,
       quantity: displayQuantity,
       averageCost,
       costBasis: Math.max(0, costBasis),
@@ -418,9 +456,7 @@ export function stockMetrics(
       }
     }
 
-    const latestPriceObj = [...safePrices]
-      .filter((item) => normalizeSymbol(item.symbol) === symbol)
-      .sort((a, b) => (b.date || "").localeCompare(a.date || ""))[0];
+    const latestPriceObj = latestStockPrice(safePrices, symbol, asOf);
     const price = safeNumber(latestPriceObj?.price);
 
     const safeQty = Math.max(0, quantity);

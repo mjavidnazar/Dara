@@ -1,9 +1,12 @@
 import {
   assetMode,
+  copySnapshotRate,
   hasValidStockOrder,
   hasValidTradeAmounts,
   isCashAccount,
   isGeneratedStockTransfer,
+  latestAssetPrice,
+  latestStockPrice,
   normalizeSymbol,
   safeNumber,
   todayIso,
@@ -165,7 +168,6 @@ export function analyzeCapital(
     }
   }
 
-  const assetQuotes = new Map<string, number>();
   for (const price of data.prices || []) {
     const target: AuditTarget = { type: "price", id: price.assetId, recordId: price.id };
     if (!validIsoDate(price.date) || price.date > asOf) {
@@ -174,17 +176,8 @@ export function analyzeCapital(
     if (!Number.isFinite(price.price) || price.price <= 0) {
       addIssue(`quote-value-${price.id}`, "error", "قیمت ثبت‌شده معتبر نیست", "قیمت صفر یا منفی را در تاریخچهٔ قیمت‌ها اصلاح کنید؛ در غیر این صورت ارزش روز قابل اتکا نیست.", target);
     }
-    if (validIsoDate(price.date) && price.date <= asOf && Number.isFinite(price.price) && price.price > 0) {
-      const key = `${price.assetId}|${price.date}`;
-      const earlier = assetQuotes.get(key);
-      if (earlier !== undefined && Math.abs(earlier - price.price) > EPSILON) {
-        addIssue(`quote-conflict-${price.id}`, "warning", "دو قیمت متفاوت برای یک روز ثبت شده", "دو نرخ متفاوت برای همین دارایی در یک روز وجود دارد. نرخ معتبر یا تاریخ صحیح را با سند تطبیق دهید؛ انتخاب یکی به‌صورت خودکار ممکن نیست.", target);
-      }
-      assetQuotes.set(key, price.price);
-    }
   }
 
-  const stockQuotes = new Map<string, number>();
   for (const price of data.stockPrices || []) {
     const target: AuditTarget = { type: "stockPrice", id: price.id };
     if (!validIsoDate(price.date) || price.date > asOf) {
@@ -192,14 +185,6 @@ export function analyzeCapital(
     }
     if (!Number.isFinite(price.price) || price.price <= 0 || !normalizeSymbol(price.symbol)) {
       addIssue(`stock-quote-value-${price.id}`, "error", "نرخ یا نماد قیمت سهام معتبر نیست", "نماد و قیمت مثبت را با سند اصلی در تاریخچهٔ قیمت سهام اصلاح کنید.", target);
-    }
-    if (validIsoDate(price.date) && price.date <= asOf && Number.isFinite(price.price) && price.price > 0 && normalizeSymbol(price.symbol)) {
-      const key = `${normalizeSymbol(price.symbol)}|${price.date}`;
-      const earlier = stockQuotes.get(key);
-      if (earlier !== undefined && Math.abs(earlier - price.price) > EPSILON) {
-        addIssue(`stock-quote-conflict-${price.id}`, "warning", "دو نرخ پایانی متفاوت برای یک نماد در یک روز", "برای محاسبهٔ ارزش روز فقط یک نرخ پایانی معتبر لازم است. تاریخ و نرخ هر دو رکورد را بررسی کنید.", target);
-      }
-      stockQuotes.set(key, price.price);
     }
   }
 
@@ -359,10 +344,11 @@ export function analyzeCapital(
       if (assetMode(asset) === "copy" && asset.copyUsdBalance !== undefined && !asset.lastValuationAt) {
         addIssue(`copy-snapshot-${asset.id}`, "warning", `تاریخ ماندهٔ دلاری ${asset.name} مشخص نیست`, "ماندهٔ دلاری فعلی تاریخ ندارد؛ نمودار گذشته تا زمان ثبت ماندهٔ امروز تقریبی است. مانده و نرخ را تأیید کنید.", { type: "price", id: asset.id });
       }
-      const history = (data.prices || []).filter((p) => p.assetId === asset.id && validIsoDate(p.date) && p.date <= asOf && Number.isFinite(p.price) && p.price > 0)
-        .sort((a, b) => b.date.localeCompare(a.date));
-      const price = assetMode(asset) === "copy" ? (asset.copyUsdRate ?? asset.currentPrice) : (history[0]?.price ?? asset.currentPrice);
-      const priceDate = assetMode(asset) === "copy" ? (asset.lastValuationAt || history[0]?.date) : (history[0]?.date || asset.createdAt?.slice(0, 10));
+      const latest = latestAssetPrice(data.prices || [], asset.id, asOf);
+      const copy = assetMode(asset) === "copy";
+      const price = copy ? copySnapshotRate(asset, latest) : (latest?.price ?? asset.currentPrice);
+      // A recent rate does not prove the copy-trading USD balance was updated.
+      const priceDate = copy ? (asset.lastValuationAt || latest?.date) : (latest?.date || asset.createdAt?.slice(0, 10));
       if (!Number.isFinite(price) || price <= 0) addIssue(`price-${asset.id}`, "error", `قیمت روز ${asset.name} ثبت نشده`, "با قیمت صفر یا نامعتبر، ارزش و سود این دارایی نادرست است. نرخ روز را ثبت کنید.", { type: "price", id: asset.id });
       else if (!priceDate || !validIsoDate(priceDate)) {
         addIssue(`undated-price-${asset.id}`, "warning", `تاریخ نرخ ${asset.name} مشخص نیست`, "بدون تاریخ معتبر نمی‌توان تازه بودن قیمت/مانده را تأیید کرد. نرخ امروز را ثبت کنید.", { type: "price", id: asset.id });
@@ -408,8 +394,7 @@ export function analyzeCapital(
       if (quantity < -EPSILON) addIssue(`stock-oversell-${order.id}`, "error", `فروش بیش از موجودی ${symbol}`, "تعداد سهام فروخته‌شده از موجودی تا تاریخ سفارش بیشتر است. مقدار/تاریخ را اصلاح کنید.", { type: "stockOrder", id: order.id });
     }
     if (quantity > EPSILON) {
-      const latest = (data.stockPrices || []).filter((p) => normalizeSymbol(p.symbol) === symbol && validIsoDate(p.date) && p.date <= asOf && Number.isFinite(p.price) && p.price > 0)
-        .sort((a, b) => b.date.localeCompare(a.date))[0];
+      const latest = latestStockPrice(data.stockPrices || [], symbol, asOf);
       if (!latest || !(latest.price > 0)) addIssue(`stock-price-${symbol}`, "error", `قیمت سهام ${symbol} ثبت نشده`, "بدون قیمت پایانی، سود و ارزش روز این نماد قابل اتکا نیست.", { type: "price" });
       else if ((Date.parse(`${asOf}T12:00:00Z`) - Date.parse(`${latest.date}T12:00:00Z`)) / 86400000 > 30) {
         addIssue(`stock-stale-${symbol}`, "warning", `قیمت سهام ${symbol} قدیمی است`, `آخرین نرخ ثبت‌شده مربوط به ${latest.date} است. قیمت‌ها را در بخش بورس به‌روز کنید.`, { type: "price" });

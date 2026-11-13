@@ -75,6 +75,7 @@ import {
   todayIso,
   toPersianDate,
   transactionLabel,
+  uid,
   validIsoDate,
 } from "../lib/portfolio";
 import type {
@@ -906,7 +907,7 @@ export function StocksDashboardView({
     if (!validIsoDate(priceDate) || priceDate > todayIso()) return;
     const updates: StockPrice[] = Object.entries(pricesState)
       .map(([symbol, priceStr]) => ({
-        id: `sp-${symbol}-${priceDate}`,
+        id: uid("sp"),
         symbol,
         price: safeNumber(priceStr),
         date: priceDate,
@@ -1764,7 +1765,7 @@ export function StocksDashboardView({
                   ]}
                 />
               </div>
-              <p>قیمت نمادهای فعال را دستی تغییر دهید یا از بورس دریافت کنید</p>
+              <p>قیمت نمادهای فعال را دستی ثبت کنید یا از بورس دریافت کنید. نرخ جدیدِ هر روز مبنای همان روز است و نرخ‌های قبلی در تاریخچه می‌مانند.</p>
             </div>
             <button
               type="button"

@@ -71,6 +71,7 @@ import type { AuditTarget } from "./lib/capitalReport";
 import { autoRemovedCounterparts, linkedTransactions, removeTransaction, upsertTransaction } from "./lib/transactionLinks";
 import { describeTransactionNote } from "./lib/transactionDescriptions";
 import { reorderRowsWithinDay } from "./lib/transactionDayOrder";
+import { appendAssetPrices, appendStockPrices, editAssetPrice, editStockPrice } from "./lib/priceHistory";
 import { exportPortfolioPdf } from "./lib/pdfExport";
 import type {
   Asset,
@@ -490,7 +491,7 @@ export default function App() {
         const found = priceMap.get(symbol);
         if (found) {
           updates.push({
-            id: `sp-auto-${symbol}-${today}`,
+            id: uid("sp-auto"),
             symbol,
             price: found,
             date: today,
@@ -499,15 +500,7 @@ export default function App() {
       }
 
       if (updates.length > 0) {
-        setData((prev) => ({
-          ...prev,
-          stockPrices: [
-            ...prev.stockPrices.filter(
-              (p) => !updates.some((u) => u.symbol === p.symbol && u.date === p.date)
-            ),
-            ...updates,
-          ],
-        }));
+        setData((prev) => appendStockPrices(prev, updates));
         notify(`${updates.length} قیمت سهام از بورس به‌روزرسانی شد.`);
       } else {
         notify("قیمت جدیدی برای نمادهای شما دریافت نشد.", "error");
@@ -854,15 +847,7 @@ export default function App() {
               data={data}
               onManagePrices={() => { setStockPriceFocusId(null); setStockPriceModal(true); }}
               onSavePrices={(updates: StockPrice[]) => {
-                setData((prev) => ({
-                  ...prev,
-                  stockPrices: [
-                    ...prev.stockPrices.filter(
-                      (p) => !updates.some((u) => u.symbol === p.symbol && u.date === p.date)
-                    ),
-                    ...updates,
-                  ],
-                }));
+                setData((prev) => appendStockPrices(prev, updates));
                 notify("قیمت‌های سهام با موفقیت به‌روزرسانی شد.");
               }}
               onSaveHamiInterest={(amount: number, date: string, note: string) => {
@@ -1622,15 +1607,24 @@ export default function App() {
             setEditingAsset(null);
           }}
           onSave={(savedAsset) => {
+            const mode = assetMode(savedAsset);
+            const date = todayIso();
+            // Editing the price in the asset form is also a new quote, not just
+            // a stale currentPrice snapshot that history silently overrides.
+            const changedPrice = editingAsset && !["cash", "stock"].includes(mode) &&
+              savedAsset.currentPrice > 0 &&
+              (mode === "copy" ? savedAsset.copyUsdRate !== editingAsset.copyUsdRate
+                : savedAsset.currentPrice !== editingAsset.currentPrice);
+            const priceEntry: PriceHistory | null = changedPrice
+              ? { id: uid("asset-price"), assetId: savedAsset.id, price: savedAsset.currentPrice, date }
+              : null;
             setData((prev) => {
               const exists = prev.assets.some((a) => a.id === savedAsset.id);
               const newAssets = exists
                 ? prev.assets.map((a) => (a.id === savedAsset.id ? savedAsset : a))
                 : [...prev.assets, savedAsset];
-              return {
-                ...prev,
-                assets: newAssets,
-              };
+              const next = { ...prev, assets: newAssets };
+              return priceEntry ? appendAssetPrices(next, [priceEntry], date) : next;
             });
             setAssetModal(false);
             const wasEditing = Boolean(editingAsset);
@@ -1664,7 +1658,7 @@ export default function App() {
       {/* Price Modal */}
       {priceModal && (
         <PriceModalBulk
-          assets={data.assets}
+          assets={presentationMetrics.map((metric) => metric.asset)}
           history={data.prices}
           focusAssetId={priceFocusAssetId ?? undefined}
           focusHistoryId={priceFocusHistoryId ?? undefined}
@@ -1676,44 +1670,15 @@ export default function App() {
               price: u.price,
               date,
             }));
-            setData((prev) => {
-              // Replace an existing quote for the same day instead of leaving two
-              // equally dated prices where the older one may win the valuation.
-              const prices = [
-                ...prev.prices.filter((price) => !(price.date === date && updates.some((u) => u.assetId === price.assetId))),
-                ...newHistory,
-              ];
-              return {
-                ...prev,
-                prices,
-                assets: prev.assets.map((asset) => {
-                  if (!updates.some((item) => item.assetId === asset.id)) return asset;
-                  const latest = prices.filter((item) => item.assetId === asset.id && validIsoDate(item.date) && item.date <= todayIso() && Number.isFinite(item.price) && item.price > 0)
-                    .sort((a, b) => b.date.localeCompare(a.date))[0];
-                  return latest ? { ...asset, currentPrice: latest.price } : asset;
-                }),
-              };
-            });
+            setData((prev) => appendAssetPrices(prev, newHistory));
             notify("قیمت‌های جدید با موفقیت ثبت شدند.");
           }}
           onEditHistory={(id, price, date) => {
-            setData((prev) => {
-              const changed = prev.prices.find((item) => item.id === id);
-              const prices = prev.prices.map((item) => item.id === id ? { ...item, price, date } : item);
-              const latest = prices.filter((item) => item.assetId === changed?.assetId && validIsoDate(item.date) && item.date <= todayIso() && Number.isFinite(item.price) && item.price > 0)
-                .sort((a, b) => b.date.localeCompare(a.date))[0];
-              return {
-                ...prev,
-                prices,
-                assets: prev.assets.map((asset) => {
-                  if (asset.id !== changed?.assetId || !latest ||
-                      (assetMode(asset) === "copy" && asset.lastValuationAt && latest.date < asset.lastValuationAt)) return asset;
-                  return assetMode(asset) === "copy"
-                    ? { ...asset, currentPrice: latest.price, copyUsdRate: latest.price }
-                    : { ...asset, currentPrice: latest.price };
-                }),
-              };
-            });
+            if (data.prices.filter((item) => item.id === id).length !== 1) {
+              notify("شناسهٔ این قیمت یکتا نیست؛ برای ویرایش ایمن، فایل پشتیبان را بررسی کنید.", "error");
+              return;
+            }
+            setData((prev) => editAssetPrice(prev, id, price, date));
             notify("رکورد قیمت اصلاح شد.");
           }}
         />
@@ -1726,10 +1691,11 @@ export default function App() {
           focusId={stockPriceFocusId ?? undefined}
           onClose={() => { setStockPriceModal(false); setStockPriceFocusId(null); }}
           onSave={(edited) => {
-            setData((prev) => ({
-              ...prev,
-              stockPrices: prev.stockPrices.map((price) => price.id === edited.id ? edited : price),
-            }));
+            if (data.stockPrices.filter((item) => item.id === edited.id).length !== 1) {
+              notify("شناسهٔ این قیمت سهام یکتا نیست؛ برای ویرایش ایمن، فایل پشتیبان را بررسی کنید.", "error");
+              return;
+            }
+            setData((prev) => editStockPrice(prev, edited));
             notify("رکورد نرخ پایانی سهام اصلاح شد.");
           }}
           onDelete={(price) => setConfirmState({
@@ -1826,24 +1792,22 @@ export default function App() {
         <CopyBalanceModal
           asset={copyModalAsset}
           onSave={(usdBalance, usdRate) => {
-            setData((prev) => ({
-              ...prev,
-              assets: prev.assets.map((a) =>
-                a.id === copyModalAsset.id
-                  ? {
-                      ...a,
-                      copyUsdBalance: usdBalance,
-                      copyUsdRate: usdRate ?? a.copyUsdRate,
-                      currentPrice: usdRate ?? a.currentPrice,
-                      lastValuationAt: todayIso(),
-                    }
-                  : a
-              ),
-              prices: usdRate && usdRate > 0 ? [
-                ...prev.prices.filter((p) => !(p.assetId === copyModalAsset.id && p.date === todayIso())),
-                { id: uid("copy-rate"), assetId: copyModalAsset.id, price: usdRate, date: todayIso() },
-              ] : prev.prices,
-            }));
+            const date = todayIso();
+            const rateEntry: PriceHistory | null = usdRate && usdRate > 0
+              ? { id: uid("copy-rate"), assetId: copyModalAsset.id, price: usdRate, date }
+              : null;
+            setData((prev) => {
+              const withBalance = {
+                ...prev,
+                assets: prev.assets.map((a) =>
+                  a.id === copyModalAsset.id
+                    ? { ...a, copyUsdBalance: usdBalance, copyUsdRate: usdRate ?? a.copyUsdRate,
+                        currentPrice: usdRate ?? a.currentPrice, lastValuationAt: date }
+                    : a
+                ),
+              };
+              return rateEntry ? appendAssetPrices(withBalance, [rateEntry], date) : withBalance;
+            });
             notify(`مانده حساب ${copyModalAsset.name} به‌روزرسانی شد.`);
           }}
           onClose={() => setCopyModalAsset(null)}
