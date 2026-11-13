@@ -193,7 +193,11 @@ test("all seven indicators are immediately visible in ReportsView, above the col
   assert.ok(card(markup, "combined-profit").includes(money(170)));
   assert.ok(card(markup, "market-value").includes(money(1265)));
   assert.ok(card(markup, "purchase-value").includes(money(1205)));
-  assert.match(card(markup, "realized-ratio"), /۸٫۷۵٪/);
+  const realizedRatioCard = card(markup, "realized-ratio");
+  assert.match(realizedRatioCard, /<span class="card-label">نسبت سود محقق‌شده به کل سرمایهٔ اولیه و اضافه‌شده<\/span>/);
+  assert.match(realizedRatioCard, /aria-label="توضیحات و نحوه محاسبه: نسبت سود محقق‌شده به کل سرمایهٔ اولیه و اضافه‌شده"/);
+  assert.match(realizedRatioCard, /مخرج: سرمایهٔ اولیه \+ آورده‌های بعدی/);
+  assert.match(realizedRatioCard, /۸٫۷۵٪/);
   assert.match(card(markup, "market-ratio"), /۱۳۷٪/);
   assert.match(card(markup, "market-ratio"), /مخرج: فقط سرمایهٔ اولیه، بدون آورده‌های بعدی/);
   assert.match(markup, /در نسبت آخر، سودِ باقی‌مانده در نقد ممکن است دوباره شمرده شود/);

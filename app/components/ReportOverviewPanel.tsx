@@ -118,7 +118,7 @@ export function ReportOverviewPanel({ overview, report }: { overview: ReportOver
         />
         <ReportMetricCard
           id="realized-ratio"
-          title="نسبت سود محقق‌شده به کل سرمایه"
+          title="نسبت سود محقق‌شده به کل سرمایهٔ اولیه و اضافه‌شده"
           value={displayRatio(overview.realizedToCapitalPercent)}
           detail={realizedRatioDetail}
           formula="نسبت = (سود / زیان محقق‌شده ÷ (سرمایهٔ اولیه + آورده‌های بعدی)) × ۱۰۰"
