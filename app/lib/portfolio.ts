@@ -339,7 +339,11 @@ export function metricsAt(
       totalProfit = realizedProfit + unrealizedProfit;
     }
 
-    const denominator = costBasis + Math.max(0, realizedProfit);
+    // For noncash assets, a lifetime gain is measured against all recorded
+    // purchases, not today's remaining cost. Once a position is fully sold,
+    // that cost is zero: adding realized profit made every profitable exit +100%,
+    // while a losing exit incorrectly showed 0%. This is a simple, non-annualized
+    // ratio over gross purchases, not a return on the portfolio's initial capital.
     const profitPercent =
       mode === "cash"
         ? costBasis > 0
@@ -347,8 +351,8 @@ export function metricsAt(
           : totalProfit > 0
           ? 100
           : 0
-        : denominator > 0
-        ? (totalProfit / denominator) * 100
+        : totalGrossBuys > 0
+        ? (totalProfit / totalGrossBuys) * 100
         : 0;
 
     const freshCapital =
