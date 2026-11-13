@@ -102,8 +102,10 @@ ${
   stockLines.length > 0
     ? `[وضعیت سبد سهام بورس]
 - ارزش روز سهام بورس: ${money(bourseSummary?.currentValue || 0)}
-- سود کل بورس تا به امروز: ${money(bourseSummary?.toDateProfit || 0)} (${percent(bourseSummary?.toDateReturnPercent || 0)})
-- سود نقدی مجامع (DPS): ${money(bourseSummary?.paidDividends || 0)}
+- نسبت سود محقق‌شده (فروش‌ها + مجامع پرداخت‌شده) به همهٔ خریدهای سهام: ${bourseSummary?.purchases ? percent(bourseSummary.realizedReturnPercent) : "—"}؛ سود محقق‌شده ${money(bourseSummary?.realizedProfit || 0)}
+- نسبت سود قیمتی سهام موجود به بهای خرید همین سهام: ${bourseSummary?.currentCost ? percent(bourseSummary.currentProfitPercent) : "—"}؛ سود فعلی ${money(bourseSummary?.currentProfit || 0)}
+- نسبت سود کل (محقق‌شده + سود فعلی + مجامع در انتظار) به همهٔ خریدهای سهام: ${bourseSummary?.purchases ? percent(bourseSummary.toDateReturnPercent) : "—"}؛ سود کل ${money(bourseSummary?.toDateProfit || 0)}؛ بازده سالانه نیست
+- سود نقدی مجامع پرداخت‌شده (DPS): ${money(bourseSummary?.paidDividends || 0)}
 - مانده سپرده نزد کارگزاری (حامی): ${money(bourseSummary?.hamiBalance || 0)}
 
 فهرست نمادهای بورسی:

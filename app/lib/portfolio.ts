@@ -539,7 +539,9 @@ export function calculateBourseSummary(
   // Realized profit: closed trades capital gain + actual paid/received cash dividends
   const realizedProfit = rawRealized + paidDividends;
   const realizedCost = Math.max(0, sales - rawRealized);
-  const realizedReturnPercent = realizedCost > 0 ? (realizedProfit / realizedCost) * 100 : 0;
+  // Paid dividends may belong to shares still held. The realized-profit ratio
+  // uses all stock purchases, not only the cost basis of shares already sold.
+  const realizedReturnPercent = purchases > 0 ? (realizedProfit / purchases) * 100 : 0;
 
   // Unrealized profit: current active stock gain + approved pending dividends
   const unrealizedProfit = currentProfit + pendingDividends;

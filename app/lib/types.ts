@@ -224,8 +224,8 @@ export interface BourseSummary {
   purchases: number;
   sales: number;
   realizedProfit: number;
-  realizedCost: number;
-  realizedReturnPercent: number;
+  realizedCost: number; // Cost of sold shares (informational; not the realized ratio's denominator).
+  realizedReturnPercent: number; // Realized profit / all recorded stock purchases.
   unrealizedProfit: number;
   paidDividends: number;
   pendingDividends: number;

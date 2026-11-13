@@ -65,7 +65,6 @@ import {
   getMonthlyCashFlows,
   getRangeStartDate,
   getSegmentsAtDate,
-  hasValidStockOrder,
   hasValidTradeAmounts,
   isGeneratedStockTransfer,
   isInterestTransaction,
@@ -393,12 +392,12 @@ export function DashboardView({
               <h3 style={{ margin: 0 }}>وضعیت پورتفوی سهام (بورس)</h3>
               <InfoButton
                 title="خلاصه پورتفوی سهام بورس"
-                formula="ارزش روز سهام = مجموع (تعداد سهم × قیمت پایانی روز) | سود جاری = ارزش روز - بهای تمام‌شده موجود | سود تحقق‌یافته = مجموع سود حاصل از سفارش‌های فروش"
-                description="نمای کلی عملکرد کلیه نمادهای بورسی و فرابورسی موجود در سبد اختصاصی سهام شما."
+                formula="ارزش روز سهام = مجموع (تعداد سهم موجود × آخرین قیمت ثبت‌شده) | سود جاری = ارزش روز - بهای تمام‌شدهٔ سهام موجود | سود محقق‌شده = سود فروش‌ها + مجامع پرداخت‌شده"
+                description="خلاصهٔ سهام بورس؛ سه نسبت سود با مخرج‌های جداگانه در میزکار بورس نمایش داده می‌شوند."
                 details={[
                   "محاسبات بر اساس فایل‌های خروجی اکسل کارگزاری یا معاملات دستی انجام می‌شود.",
-                  "درصد سود روز = (سود جاری سهام فعال ÷ بهای تمام‌شده خرید آن‌ها) × ۱۰۰",
-                  "سود محقق‌شده از کسر بهای میانگین خرید از مبلغ فروش در هر تراکنش به دست می‌آید."
+                  "درصد سود جاری سهام موجود بر بهای خرید همان سهام تقسیم می‌شود؛ نسبت سود محقق‌شده و نسبت سود کل هر دو بر مجموع همهٔ خریدهای سهام تقسیم می‌شوند.",
+                  "سود فروش هر معامله برابر مبلغ خالص فروش منهای بهای میانگین سهم‌های فروخته‌شده است."
                 ]}
               />
             </div>
@@ -661,6 +660,7 @@ export function DashboardView({
 export function StocksDashboardView({
   items,
   data,
+  stockSummary,
   onSavePrices,
   onManagePrices,
   onSaveHamiInterest,
@@ -673,6 +673,7 @@ export function StocksDashboardView({
 }: {
   items: StockSymbolMetric[];
   data: PortfolioData;
+  stockSummary: BourseSummary;
   onSavePrices: (updates: StockPrice[]) => void;
   onManagePrices: () => void;
   onSaveHamiInterest: (amount: number, date: string, note: string) => void;
@@ -721,31 +722,24 @@ export function StocksDashboardView({
     [items, data.stockDividends]
   );
 
-  const totalCurrentValue = currentStocks.reduce((sum, item) => sum + item.value, 0);
-  const totalCurrentCost = currentStocks.reduce((sum, item) => sum + item.cost, 0);
-  const totalCurrentProfit = totalCurrentValue - totalCurrentCost;
-  const currentProfitPercent =
-    totalCurrentCost > 0 ? (totalCurrentProfit / totalCurrentCost) * 100 : 0;
-
-  const totalPurchases = (data.stockOrders || [])
-    .filter((item) => validIsoDate(item.date) && item.date <= todayIso() && hasValidStockOrder(item) && item.type === "buy")
-    .reduce((sum, item) => sum + safeNumber(item.totalPrice), 0);
-  const totalSales = (data.stockOrders || [])
-    .filter((item) => validIsoDate(item.date) && item.date <= todayIso() && hasValidStockOrder(item) && item.type === "sell")
-    .reduce((sum, item) => sum + safeNumber(item.totalPrice), 0);
-
+  // Use the same summary as the dashboard and asset cards for all three ratios.
+  const {
+    currentValue: totalCurrentValue,
+    currentCost: totalCurrentCost,
+    currentProfit: totalCurrentProfit,
+    currentProfitPercent,
+    purchases: totalPurchases,
+    sales: totalSales,
+    realizedProfit: totalRealizedProfit,
+    realizedReturnPercent,
+    unrealizedProfit: totalUnrealizedProfit,
+    paidDividends,
+    pendingDividends,
+    totalDividends,
+    toDateProfit,
+    toDateReturnPercent,
+  } = stockSummary;
   const totalRealizedTrades = items.reduce((sum, item) => sum + item.realized, 0);
-  const paidDividends = items.reduce((sum, item) => sum + item.paidDividend, 0);
-  const pendingDividends = items.reduce((sum, item) => sum + item.pendingDividend, 0);
-  const totalDividends = paidDividends + pendingDividends;
-
-  // Realized profit: realized trades capital gains + paid/received cash dividends
-  const totalRealizedProfit = totalRealizedTrades + paidDividends;
-  // Unrealized profit: current active stock gain + approved pending dividends
-  const totalUnrealizedProfit = totalCurrentProfit + pendingDividends;
-  // Total profit = Realized profit + Unrealized profit
-  const toDateProfit = totalRealizedProfit + totalUnrealizedProfit;
-  const toDateReturn = totalPurchases > 0 ? (toDateProfit / totalPurchases) * 100 : 0;
 
   const hami = data.assets.find((asset) => asset.name.includes("حامی"));
   const hamiTransactions = hami
@@ -947,30 +941,26 @@ export function StocksDashboardView({
 
   return (
     <div className="view-container">
-      {/* 5 KPI Cards */}
-      <section className="stock-kpi-grid">
+      {/* Values and cash balances are separate from the three stock-profit ratios. */}
+      <section className="stock-kpi-grid stock-balance-grid" aria-label="ارزش سهام و نقدینگی بورس">
         <article className="hero-card">
           <div className="card-label-with-info">
             <span className="card-label">ارزش روز سهام فعال</span>
             <InfoButton
               title="ارزش روز سهام فعال"
-              formula="ارزش روز = مجموع (تعداد سهم موجود هر نماد × قیمت روز پایانی) | سود جاری = ارزش روز فعلی - بهای تمام‌شده موجودی"
-              description="مجموع ارزش بازاری سهام موجود در پورتفوی شما که هنوز فروخته نشده‌اند."
+              formula="ارزش روز = مجموع (تعداد سهم موجود هر نماد × آخرین قیمت ثبت‌شده) | سود جاری = ارزش روز - بهای تمام‌شدهٔ سهام موجود"
+              description="ارزش سهامی که هنوز فروخته نشده است؛ درصد سود این سهام به‌طور جداگانه در نسبت دوم نمایش داده می‌شود."
               details={[
-                "قیمت روز از آخرین قیمت پایانی اعلام‌شده در سامانه بورس استخراج می‌شود.",
-                "درصد سود جاری = (سود جاری سهام فعال ÷ بهای تمام‌شده خرید آن‌ها) × ۱۰۰",
-                "نوسانات قیمت پایانی بازار مستقیماً این رقم و سود جاری را تغییر می‌دهند."
+                "قیمت، آخرین قیمت معتبر ثبت‌شده برای هر نماد است و الزاماً قیمت زندهٔ بازار نیست.",
+                "مجامع و سود فروش‌های گذشته در سود قیمتی سهام موجود منظور نمی‌شوند."
               ]}
             />
           </div>
           <div className="card-val-row">
             <h2>{money(totalCurrentValue)}</h2>
-            <span className={`pill-badge ${totalCurrentProfit >= 0 ? "positive" : "negative"}`}>
-              {percent(currentProfitPercent)}
-            </span>
           </div>
           <p className="card-sub">
-            سود جاری:{" "}
+            سود قیمتی سهام موجود:{" "}
             <b className={totalCurrentProfit >= 0 ? "positive-text" : "negative-text"}>
               {signedMoney(totalCurrentProfit)}
             </b>
@@ -988,7 +978,7 @@ export function StocksDashboardView({
                 "با هر خرید سهام، وجه مستقیماً از مانده حامی کسر می‌شود.",
                 "با هر فروش سهام، وجه حاصل از فروش بلافاصله به مانده حامی اضافه می‌شود.",
                 "هر گونه واریز وجه از بانک، مانده حامی را افزایش و برداشت، آن را کاهش می‌دهد.",
-                `مجموع سود ماهانه واریزی حامی تا این لحظه: ${money(hamiTotalInterest)} تومان`
+                `مجموع سود ماهانه واریزی حامی تا این لحظه: ${money(hamiTotalInterest)}`
               ]}
             />
           </div>
@@ -1002,48 +992,24 @@ export function StocksDashboardView({
 
         <article className="hero-card">
           <div className="card-label-with-info">
-            <span className="card-label">سود محقق‌شده کل بورس</span>
-            <InfoButton
-              title="سود محقق‌شده کل بورس"
-              formula="سود محقق‌شده بورس = سود معاملات فروش‌رفته + سود نقدی مجامع واریزشده (محقق‌شده)"
-              description="مجموع تمام سودهای قطعی و وصول‌شده از ابتدای فعالیت در بورس (شامل معاملات و مجامع واریزی)."
-              details={[
-                `سود قطعی معاملات فروش: ${signedMoney(totalRealizedTrades)} تومان`,
-                `سود نقدی مجامع وصول‌شده (محقق‌شده): ${money(paidDividends)} تومان`,
-                "این سود قطعی و نقد شده است و دیگر دستخوش نوسان بازار نخواهد بود."
-              ]}
-            />
-          </div>
-          <div className="card-val-row">
-            <h2 className={totalRealizedProfit >= 0 ? "positive-text" : "negative-text"}>
-              {signedMoney(totalRealizedProfit)}
-            </h2>
-          </div>
-          <p className="card-sub">
-            معاملات: {signedMoney(totalRealizedTrades)} · مجامع: {money(paidDividends)}
-          </p>
-        </article>
-
-        <article className="hero-card">
-          <div className="card-label-with-info">
             <span className="card-label">سود نقدی مجامع (DPS)</span>
             <InfoButton
               title="سود نقدی مجامع (DPS)"
-              formula="سود کل مجامع = سود مجمع محقق‌شده (واریزشده) + سود مجمع محقق‌نشده (در انتظار واریز)"
-              description="سود تقسیمی نقدی حاصل از حضور در مجمع شرکت‌های بورسی و وضعیت تحقق آن."
+              formula="سود کل مجامع = سود مجمع پرداخت‌شده + سود مجمع در انتظار پرداخت"
+              description="سود تقسیمی ثبت‌شدهٔ شرکت‌های بورسی و وضعیت پرداخت آن."
               details={[
-                "محقق‌شده (واریزشده): مبالغی که نقداً از طریق سجام یا بانک وصول گردیده و به سود محقق‌شده اضافه شده است.",
-                "محقق‌نشده (در انتظار): مبالغ مصوب مجمع که طبق جدول زمان‌بندی کدال هنوز واریز نشده‌اند.",
-                "با کلیک روی دکمه‌های وضعیت در جدول مجامع، می‌توانید وضعیت هر سود را بین محقق‌شده و محقق‌نشده جابجا کنید."
+                "مجامع پرداخت‌شده در سود محقق‌شده (نسبت اول) محاسبه می‌شوند.",
+                "مجامع در انتظار پرداخت تنها در سود کل (نسبت سوم) محاسبه می‌شوند.",
+                "با کلیک روی دکمه‌های وضعیت در جدول مجامع، می‌توانید وضعیت هر سود را تغییر دهید."
               ]}
             />
           </div>
           <div className="card-val-row">
             <h2>{money(totalDividends)}</h2>
           </div>
-          <div style={{ display: "flex", gap: "8px", marginTop: "6px", fontSize: "12px" }}>
+          <div style={{ display: "flex", gap: "8px", marginTop: "6px", fontSize: "12px", flexWrap: "wrap" }}>
             <span className="positive-text">
-              محقق‌شده: <b>{money(paidDividends)}</b>
+              پرداخت‌شده: <b>{money(paidDividends)}</b>
             </span>
             <span style={{ color: "var(--muted)" }}>|</span>
             <span style={{ color: "#d97706" }}>
@@ -1051,33 +1017,76 @@ export function StocksDashboardView({
             </span>
           </div>
         </article>
+      </section>
 
-        <article className="hero-card highlight-kpi">
+      <div className="stock-returns-heading">
+        <h3>سه نسبت سود بورس</h3>
+        <p>درصدهای زیر نسبت به بهای خریدهای ثبت‌شده‌اند؛ بازده سالانه یا بازده سرمایهٔ اولیه نیستند.</p>
+      </div>
+      <section className="stock-kpi-grid stock-returns-grid" aria-label="سه نسبت سود بورس">
+        <article className="hero-card stock-return-card" data-stock-return="realized">
           <div className="card-label-with-info">
-            <span className="card-label">بازدهی کل بورس از ابتدا</span>
+            <span className="card-label">۱. سود محقق‌شده / همهٔ خریدها</span>
             <InfoButton
-              title="بازدهی کل بورس از ابتدا"
-              formula="سود کل بورس = سود محقق‌شده (فروش‌ها + مجامع واریزی) + سود محقق‌نشده (ارزش روز سهام فعال + مجامع در انتظار) | درصد بازدهی = (سود کل ÷ کل مبالغ خریدها) × ۱۰۰"
-              description="شاخص نهایی عملکرد جامع سرمایه‌گذاری شما در بازار بورس از اولین روز فعالیت تا امروز."
+              title="نسبت سود محقق‌شده به همهٔ خریدهای سهام"
+              formula="(سود/زیان فروش سهام + سود مجامع پرداخت‌شده) ÷ مجموع مبلغ همهٔ خریدهای سهام × ۱۰۰"
+              description="سود محقق‌شده نسبت به تمام خریدهای ثبت‌شده، حتی خریدِ سهامی که هنوز فروخته نشده است."
               details={[
-                "این فرمول بازدهی جامع (Total Return) را شامل ارزش جاری، سود فروش‌های قبلی و تمام سودهای نقدی مجمع می‌سنجد.",
-                `سود قطعی محقق‌شده: ${signedMoney(totalRealizedProfit)} تومان`,
-                `سود محقق‌نشده (جاری بازار + در انتظار مجمع): ${signedMoney(totalUnrealizedProfit)} تومان`,
-                `مجموع خریدهای ثبت‌شده: ${money(totalPurchases)} تومان · مجموع فروش‌ها: ${money(totalSales)} تومان`
+                `سود/زیان فروش‌ها (فروش خالص منهای بهای میانگین سهام فروخته‌شده): ${signedMoney(totalRealizedTrades)}`,
+                `مجامع پرداخت‌شده: ${money(paidDividends)}`,
+                `کل خریدهای سهام: ${money(totalPurchases)}؛ نه فقط بهای سهام فروخته‌شده.`,
+                "سود فعلی سهام موجود و مجامع در انتظار در این نسبت نیستند."
               ]}
             />
           </div>
-          <div className="card-val-row">
-            <h2 className={toDateProfit >= 0 ? "positive-text" : "negative-text"}>
-              {signedMoney(toDateProfit)}
-            </h2>
-            <span className={`pill-badge ${toDateReturn >= 0 ? "positive" : "negative"}`}>
-              {percent(toDateReturn)}
-            </span>
+          <h2 className={totalPurchases > 0 ? (totalRealizedProfit >= 0 ? "positive-text" : "negative-text") : undefined}>
+            {totalPurchases > 0 ? percent(realizedReturnPercent) : "—"}
+          </h2>
+          <p className="card-sub">سود/زیان محقق‌شده: <b>{signedMoney(totalRealizedProfit)}</b></p>
+          <p className="card-sub">مخرج: همهٔ خریدهای سهام، {money(totalPurchases)}</p>
+        </article>
+
+        <article className="hero-card stock-return-card" data-stock-return="current">
+          <div className="card-label-with-info">
+            <span className="card-label">۲. سود فعلی / بهای سهام موجود</span>
+            <InfoButton
+              title="نسبت سود فعلی به بهای سهام موجود"
+              formula="(ارزش روز سهام موجود − بهای تمام‌شدهٔ همان سهام) ÷ بهای تمام‌شدهٔ همان سهام × ۱۰۰"
+              description="تغییر قیمت سهامی که هنوز در سبد دارید، نسبت به بهای خرید همان تعداد سهم."
+              details={[
+                `ارزش روز سهام موجود: ${money(totalCurrentValue)}`,
+                `بهای خرید سهام موجود، پس از کسر بهای سهم‌های فروخته‌شده: ${money(totalCurrentCost)}`,
+                "سود فروش‌های گذشته و مجامع پرداخت‌شده یا در انتظار در این نسبت نیستند."
+              ]}
+            />
           </div>
-          <p className="card-sub">
-            محقق‌شده: {signedMoney(totalRealizedProfit)} · محقق‌نشده: {signedMoney(totalUnrealizedProfit)}
-          </p>
+          <h2 className={totalCurrentCost > 0 ? (totalCurrentProfit >= 0 ? "positive-text" : "negative-text") : undefined}>
+            {totalCurrentCost > 0 ? percent(currentProfitPercent) : "—"}
+          </h2>
+          <p className="card-sub">سود/زیان قیمتی سهام موجود: <b>{signedMoney(totalCurrentProfit)}</b></p>
+          <p className="card-sub">مخرج: بهای خرید همین سهام، {money(totalCurrentCost)}</p>
+        </article>
+
+        <article className="hero-card stock-return-card highlight-kpi" data-stock-return="total">
+          <div className="card-label-with-info">
+            <span className="card-label">۳. سود کل / همهٔ خریدها</span>
+            <InfoButton
+              title="نسبت سود محقق‌شده و محقق‌نشده به همهٔ خریدها"
+              formula="(سود/زیان فروش‌ها + مجامع پرداخت‌شده + سود/زیان فعلی سهام موجود + مجامع در انتظار) ÷ مجموع همهٔ خریدهای سهام × ۱۰۰"
+              description="جمع سود محقق‌شده و محقق‌نشده نسبت به کل خریدهای تاریخی سهام."
+              details={[
+                `سود محقق‌شده: ${signedMoney(totalRealizedProfit)}`,
+                `سود محقق‌نشده (تغییر قیمت سهام موجود + مجامع در انتظار): ${signedMoney(totalUnrealizedProfit)}`,
+                `مجموع خریدهای ثبت‌شده: ${money(totalPurchases)} · مجموع فروش‌ها: ${money(totalSales)}`,
+                "خرید دوباره با پول فروش، مخرج را افزایش می‌دهد؛ این نسبت بازده سالانه یا بازده سرمایهٔ اولیه نیست."
+              ]}
+            />
+          </div>
+          <h2 className={totalPurchases > 0 ? (toDateProfit >= 0 ? "positive-text" : "negative-text") : undefined}>
+            {totalPurchases > 0 ? percent(toDateReturnPercent) : "—"}
+          </h2>
+          <p className="card-sub">سود/زیان کل (محقق‌شده + محقق‌نشده): <b>{signedMoney(toDateProfit)}</b></p>
+          <p className="card-sub">مخرج: همهٔ خریدهای سهام، {money(totalPurchases)}</p>
         </article>
       </section>
 
@@ -2091,7 +2100,7 @@ export function AssetsView({
                       mode === "cash"
                         ? "مانده ریالی = مجموع واریزها + سودهای ماهانه + حاصل فروش سهام - خریدهای سهام - برداشت‌ها | سود کل = مجموع سودهای واریزی ماهانه"
                         : mode === "stock"
-                        ? "سود کل بورس = سود/زیان فروش سهام + سود جاری سهام فعال + سود مجامع | درصد سود = (سود کل ÷ مجموع مبالغ خریدِ سفارش‌های سهام) × ۱۰۰؛ بازده سالانه نیست"
+                        ? "سود کل بورس = سود/زیان فروش سهام + سود قیمتی سهام موجود + مجامع پرداخت‌شده و در انتظار | درصد این کارت = سود کل ÷ مجموع مبالغ سفارش‌های خرید سهام × ۱۰۰؛ بازده سالانه نیست"
                         : "ارزش روز = موجودی × قیمت روز | سود کل = سود/زیان فروش‌های گذشته + ارزش روز موجودی − بهای تمام‌شدهٔ موجودی | درصد سود = (سود کل ÷ مجموع مبالغ همهٔ خریدهای ثبت‌شده) × ۱۰۰؛ این نسبت بازده سالانه نیست"
                     }
                     description={
@@ -2111,7 +2120,7 @@ export function AssetsView({
                         : mode === "stock"
                         ? [
                             `ارزش سهام فعال: ${money(item.marketValue)}.`,
-                            "مخرج درصد سود بورس، جمع مبالغ خریدِ سفارش‌های سهام در میزکار بورس است، نه بهای تمام‌شدهٔ موجودی فعلی."
+                            "درصد این کارت همان نسبت سوم میزکار بورس است: سود کل ÷ همهٔ خریدهای سهام؛ نسبت‌های سود محقق‌شده و سود سهام موجود را جداگانه در میزکار بورس ببینید."
                           ]
                         : [
                             `موجودی فعلی: ${nf.format(item.quantity)} ${item.asset.unit || "واحد"} حاصل تفریق تمام فروش‌ها از خریدهاست.`,

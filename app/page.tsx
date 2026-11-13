@@ -845,6 +845,7 @@ export default function App() {
             <StocksDashboardView
               items={stockData}
               data={data}
+              stockSummary={stockSummary}
               onManagePrices={() => { setStockPriceFocusId(null); setStockPriceModal(true); }}
               onSavePrices={(updates: StockPrice[]) => {
                 setData((prev) => appendStockPrices(prev, updates));
