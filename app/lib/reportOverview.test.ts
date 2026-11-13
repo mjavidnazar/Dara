@@ -58,7 +58,7 @@ function evaluated(data: PortfolioData) {
   return { audit, metrics, overview: calculateReportOverview(metrics, audit, market, profit) };
 }
 
-test("report totals use gross contributions, open-lot cost and all paid realized income without double-counting stock dividends", () => {
+test("realized ratio uses gross contributions; new market-plus-realized ratio uses opening capital only", () => {
   const data = portfolio();
   const before = JSON.stringify(data);
   const { audit, overview, metrics } = evaluated(data);
@@ -73,7 +73,7 @@ test("report totals use gross contributions, open-lot cost and all paid realized
   assert.equal(overview.currentMarketValue, 1265);
   assert.equal(overview.currentValueAtPurchase, 1205); // cash at face 1005 + gold cost 100 + stock cost 100
   assert.equal(overview.realizedToCapitalPercent, 8.75);
-  assert.ok(Math.abs((overview.marketToCapitalPercent ?? 0) - 1265 / 1200 * 100) < 1e-9);
+  assert.equal(overview.marketPlusRealizedToInitialPercent, 137); // (1265 current cash/holdings + 105 realized) / 1000 opening
   assert.equal(overview.profitComponentsMatch, true);
   assert.equal(JSON.stringify(data), before, "the report must not modify transactions or quotes");
 
@@ -84,7 +84,7 @@ test("report totals use gross contributions, open-lot cost and all paid realized
   assert.equal(fresh.currentValueAtPurchase, 1205);
   assert.equal(fresh.currentMarketValue, 1295);
   assert.equal(fresh.combinedProfit, 200);
-  assert.ok(Math.abs((fresh.marketToCapitalPercent ?? 0) - 1295 / 1200 * 100) < 1e-9);
+  assert.equal(fresh.marketPlusRealizedToInitialPercent, 140); // only market changes when today's quote changes
 });
 
 test("unknown or zero opening capital never silently becomes a zero denominator or a made-up percentage", () => {
@@ -92,13 +92,17 @@ test("unknown or zero opening capital never silently becomes a zero denominator 
   const missing = calculateReportOverview(metrics, { initialCapital: null, additionalCapital: 200 }, 1265, 170);
   assert.equal(missing.grossCapital, null);
   assert.equal(missing.realizedToCapitalPercent, null);
-  assert.equal(missing.marketToCapitalPercent, null);
+  assert.equal(missing.marketPlusRealizedToInitialPercent, null);
   assert.equal(missing.currentMarketValue, overview.currentMarketValue);
   assert.equal(missing.currentValueAtPurchase, overview.currentValueAtPurchase);
   const empty = calculateReportOverview([], { initialCapital: 0, additionalCapital: 0 }, 0, 0);
   assert.equal(empty.grossCapital, 0);
   assert.equal(empty.realizedToCapitalPercent, null);
-  assert.equal(empty.marketToCapitalPercent, null);
+  assert.equal(empty.marketPlusRealizedToInitialPercent, null);
+  const onlyAdditional = calculateReportOverview([], { initialCapital: 0, additionalCapital: 200 }, 0, 0);
+  assert.equal(onlyAdditional.grossCapital, 200);
+  assert.equal(onlyAdditional.realizedToCapitalPercent, 0);
+  assert.equal(onlyAdditional.marketPlusRealizedToInitialPercent, null, "later contributions cannot substitute for initial capital");
   assert.equal(calculateReportOverview([], { initialCapital: null, additionalCapital: 0 }, 0, 0).grossCapital, null);
 });
 
@@ -112,17 +116,23 @@ test("cash debt stays signed, fully sold positions do not inflate the open-cost 
   assert.equal(result.currentValueAtPurchase, -100, "debt is not clipped to zero; sold assets have no remaining book value");
   assert.equal(result.realizedProfit, 20);
   assert.equal(result.realizedToCapitalPercent, 20);
+  assert.equal(result.marketPlusRealizedToInitialPercent, 40); // signed cash debt is included in the provided market total
   const invalid = calculateReportOverview([debt, sold], { initialCapital: 100, additionalCapital: 0 }, Infinity, NaN);
   assert.equal(invalid.currentMarketValue, null);
   assert.equal(invalid.combinedProfit, 20, "finite components can still be shown as raw while the dashboard is invalid");
-  assert.equal(invalid.marketToCapitalPercent, null);
+  assert.equal(invalid.marketPlusRealizedToInitialPercent, null);
   assert.equal(invalid.profitComponentsMatch, false);
   const broken = calculateReportOverview([{ ...sold, realizedProfit: NaN }],
     { initialCapital: 100, additionalCapital: 0 }, 20, 20);
   assert.equal(broken.realizedProfit, null);
   assert.equal(broken.combinedProfit, null);
   assert.equal(broken.realizedToCapitalPercent, null);
+  assert.equal(broken.marketPlusRealizedToInitialPercent, null);
   assert.equal(broken.profitComponentsMatch, false);
+  const overflowingNumerator = calculateReportOverview([{ ...sold, realizedProfit: Number.MAX_VALUE }],
+    { initialCapital: 100, additionalCapital: 0 }, Number.MAX_VALUE, Number.MAX_VALUE);
+  assert.equal(overflowingNumerator.marketPlusRealizedToInitialPercent, null,
+    "an overflowing market-plus-realized numerator must not display a fabricated percentage");
 });
 
 test("copy-trading snapshots use recorded capital cost rather than treating a changed USD balance as a cash withdrawal", () => {
@@ -184,7 +194,9 @@ test("all seven indicators are immediately visible in ReportsView, above the col
   assert.ok(card(markup, "market-value").includes(money(1265)));
   assert.ok(card(markup, "purchase-value").includes(money(1205)));
   assert.match(card(markup, "realized-ratio"), /۸٫۷۵٪/);
-  assert.match(card(markup, "market-ratio"), /۱۰۵٫۴۲٪/);
+  assert.match(card(markup, "market-ratio"), /۱۳۷٪/);
+  assert.match(card(markup, "market-ratio"), /مخرج: فقط سرمایهٔ اولیه، بدون آورده‌های بعدی/);
+  assert.match(markup, /در نسبت آخر، سودِ باقی‌مانده در نقد ممکن است دوباره شمرده شود/);
   assert.match(markup, /برداشت:.*کسر نشده/);
 });
 

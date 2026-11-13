@@ -37,9 +37,13 @@ const displayRatio = (ratio: number | null) => ratio === null ? "—" : `${nf.fo
 
 export function ReportOverviewPanel({ overview, report }: { overview: ReportOverview; report: CapitalReport }) {
   const ready = report.isReliable && overview.profitComponentsMatch;
-  const ratioDetail = overview.grossCapital === null
+  const realizedRatioDetail = overview.grossCapital === null
     ? "تا ثبت سرمایهٔ اولیه، مخرج معلوم نیست."
     : overview.grossCapital <= 0 ? "کل سرمایه باید مثبت باشد." : "مخرج: سرمایهٔ اولیه + آورده‌های بعدی";
+  const marketRatioDetail = report.initialCapital === null
+    ? "تا ثبت سرمایهٔ اولیه، مخرج معلوم نیست."
+    : !Number.isFinite(report.initialCapital) || report.initialCapital <= 0
+      ? "سرمایهٔ اولیه باید مثبت باشد." : "مخرج: فقط سرمایهٔ اولیه، بدون آورده‌های بعدی";
 
   return (
     <section className="panel-card report-overview" aria-labelledby="report-overview-heading">
@@ -116,23 +120,23 @@ export function ReportOverviewPanel({ overview, report }: { overview: ReportOver
           id="realized-ratio"
           title="نسبت سود محقق‌شده به کل سرمایه"
           value={displayRatio(overview.realizedToCapitalPercent)}
-          detail={ratioDetail}
+          detail={realizedRatioDetail}
           formula="نسبت = (سود / زیان محقق‌شده ÷ (سرمایهٔ اولیه + آورده‌های بعدی)) × ۱۰۰"
           description="برداشت‌ها از مخرج کم نشده‌اند. این عدد بازدهی سالانه یا بازدهی زمان‌وزن نیست و در صورت فقدان مخرج معتبر نمایش داده نمی‌شود."
           tone={overview.realizedToCapitalPercent === null ? undefined : overview.realizedToCapitalPercent >= 0 ? "positive" : "negative"}
         />
         <ReportMetricCard
           id="market-ratio"
-          title="نسبت ارزش روز دارایی‌های فعلی به کل سرمایه"
-          value={displayRatio(overview.marketToCapitalPercent)}
-          detail={ratioDetail}
-          formula="نسبت = (ارزش روز دارایی‌ها و ماندهٔ نقدی ÷ (سرمایهٔ اولیه + آورده‌های بعدی)) × ۱۰۰"
-          description="مقدار ارزشِ موجود نسبت به کل آوردهٔ ناخالص است، نه درصد سود؛ برداشت‌ها از مخرج کم نشده‌اند و در صورت فقدان مخرج معتبر نمایش داده نمی‌شود."
+          title="نسبت (ارزش روز دارایی‌ها + سود محقق‌شده) به سرمایهٔ اولیه"
+          value={displayRatio(overview.marketPlusRealizedToInitialPercent)}
+          detail={marketRatioDetail}
+          formula="نسبت = ((ارزش روز دارایی‌ها و ماندهٔ نقدی + کل سود / زیان محقق‌شده) ÷ سرمایهٔ اولیه) × ۱۰۰"
+          description="طبق فرمول درخواستی، آورده‌های بعدی و برداشت‌ها در مخرج این نسبت نیستند. سود محقق‌شده‌ای که هنوز در حساب نقدی است ممکن است از قبل در ارزش روز باشد و با این جمع دوبار شمرده شود؛ این نسبت بازدهی خالص یا ارزش واقعی سبد نیست. اگر سرمایهٔ اولیه مثبت و معتبر نباشد درصد نمایش داده نمی‌شود."
         />
       </div>
       <p className="report-overview-footnote">
-        مبنای «کل سرمایه» در هر دو نسبت، مجموع سرمایهٔ اولیه و سرمایهٔ اضافه‌شده است؛ برداشت‌ها از آن کسر نشده‌اند.
-        ارزش خریدِ موجودی فعلی نیز شامل ماندهٔ نقدی با ارزش اسمی است. این نسبت‌ها جایگزین تطبیق سرمایه یا محاسبهٔ بازدهی زمان‌وزن نیستند.
+        مخرج نسبت سود محقق‌شده، «سرمایهٔ اولیه + آورده‌های بعدی» و مخرج نسبت آخر، فقط «سرمایهٔ اولیه» است؛ برداشت‌ها از هیچ‌کدام کسر نمی‌شوند.
+        ارزش خریدِ موجودی فعلی شامل ماندهٔ نقدی با ارزش اسمی است. در نسبت آخر، سودِ باقی‌مانده در نقد ممکن است دوباره شمرده شود؛ آن را بازدهی خالص تلقی نکنید.
       </p>
     </section>
   );

@@ -4,14 +4,14 @@ import type { AssetMetric } from "./types";
 
 export interface ReportOverview {
   // Gross external contributions: withdrawals are displayed separately, never
-  // silently deducted from the denominator selected for the two ratios.
+  // silently deducted from the realized-profit ratio's denominator.
   grossCapital: number | null;
   realizedProfit: number | null;
   combinedProfit: number | null;
   currentMarketValue: number | null;
   currentValueAtPurchase: number | null;
   realizedToCapitalPercent: number | null;
-  marketToCapitalPercent: number | null;
+  marketPlusRealizedToInitialPercent: number | null;
   profitComponentsMatch: boolean;
 }
 
@@ -42,6 +42,10 @@ export function calculateReportOverview(
   ));
   const safeMarket = finiteOrNull(currentMarketValue);
   const hasCapital = grossCapital !== null && grossCapital > 0;
+  const initialCapital = report.initialCapital;
+  const hasInitialCapital = initialCapital !== null && Number.isFinite(initialCapital) && initialCapital > 0;
+  const marketPlusRealized = safeMarket !== null && realizedProfit !== null
+    ? finiteOrNull(safeMarket + realizedProfit) : null;
 
   return {
     grossCapital,
@@ -50,7 +54,10 @@ export function calculateReportOverview(
     currentMarketValue: safeMarket,
     currentValueAtPurchase,
     realizedToCapitalPercent: hasCapital && realizedProfit !== null ? finiteOrNull(realizedProfit / grossCapital * 100) : null,
-    marketToCapitalPercent: hasCapital && safeMarket !== null ? finiteOrNull(safeMarket / grossCapital * 100) : null,
+    // This is the user's literal formula, NOT net equity or a time-weighted
+    // return: realized gains still held as cash may already be in market value.
+    marketPlusRealizedToInitialPercent: hasInitialCapital && marketPlusRealized !== null
+      ? finiteOrNull(marketPlusRealized / initialCapital * 100) : null,
     // A special account can disagree with its own profit breakdown. Compare
     // both each position AND the overall dashboard total: compensating errors
     // must not make a contradictory sum look verified.
