@@ -70,6 +70,7 @@ import { analyzeCapital } from "./lib/capitalReport";
 import type { AuditTarget } from "./lib/capitalReport";
 import { autoRemovedCounterparts, linkedTransactions, removeTransaction, upsertTransaction } from "./lib/transactionLinks";
 import { describeTransactionNote } from "./lib/transactionDescriptions";
+import { reorderRowsWithinDay } from "./lib/transactionDayOrder";
 import { exportPortfolioPdf } from "./lib/pdfExport";
 import type {
   Asset,
@@ -1004,6 +1005,8 @@ export default function App() {
               }}
               onEdit={openTransactionForEdit}
               onDelete={confirmTransactionDeletion}
+              onReorder={(sourceKey, targetKey, position) =>
+                setData((prev) => reorderRowsWithinDay(prev, sourceKey, targetKey, position))}
               onCsv={() => exportCsv(data)}
               onPdf={handlePortfolioPdf}
               onStockImport={() => stockImportRef.current?.click()}

@@ -3027,6 +3027,33 @@ td { padding: 13px 10px; border-bottom: 1px solid #edf1ef; font-size: 10px; }
 [data-theme="dark"] .transaction-review-note.error .transaction-review-label,
 [data-theme="dark"] .transaction-review-asset-flag.error > span { color: #fda4af; }
 
+/* Same-day ledger ordering: visible in the first column even on a narrow screen. */
+.transaction-order-guide {
+  display: flex; align-items: center; gap: 9px 13px; flex-wrap: wrap;
+  margin: 0 0 12px; padding: 10px 13px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--surface-soft); color: var(--ink);
+}
+.transaction-order-guide > svg { flex: none; color: var(--primary); }
+.transaction-order-guide p { flex: 1 1 260px; min-width: 0; margin: 0; font-size: 11px; line-height: 1.8; }
+.transaction-order-guide small { display: block; font-size: 10px; color: var(--muted); }
+.transaction-order-controls { display: flex; gap: 4px; align-items: center; margin-top: 8px; white-space: nowrap; }
+.transaction-order-controls button {
+  display: inline-grid; place-items: center; width: 32px; height: 32px; padding: 0;
+  border: 1px solid var(--line); border-radius: 7px;
+  background: var(--panel); color: var(--ink);
+}
+.transaction-order-controls button:hover:not(:disabled) {
+  border-color: var(--primary); color: var(--primary); background: var(--surface-soft);
+}
+.transaction-order-controls button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.transaction-order-controls button:disabled { opacity: .45; cursor: not-allowed; }
+.transaction-order-controls .transaction-drag-handle { cursor: grab; touch-action: none; user-select: none; }
+.transaction-order-controls .transaction-drag-handle:active { cursor: grabbing; }
+.transaction-ledger-table tbody tr.transaction-dragging { opacity: .55; outline: 2px dashed var(--primary); outline-offset: -2px; }
+.transaction-ledger-table tbody tr.transaction-drop-before td { border-top: 3px solid var(--primary); }
+.transaction-ledger-table tbody tr.transaction-drop-after td { border-bottom: 3px solid var(--primary); }
+
 .transaction-description-preview { padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-soft); overflow-wrap: anywhere; }
 .transaction-description-preview b { font-size: 12px; }
 .transaction-description-preview p { margin: 6px 0; font-size: 12px; line-height: 1.9; white-space: pre-line; }

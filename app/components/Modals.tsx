@@ -28,6 +28,7 @@ import {
 } from "../lib/portfolio";
 import { linkedTransactions } from "../lib/transactionLinks";
 import { describeTransactionNote } from "../lib/transactionDescriptions";
+import { compareRowsWithinDay, ledgerRowKey } from "../lib/transactionDayOrder";
 import type {
   Asset,
   Attachment,
@@ -1282,7 +1283,8 @@ export function StockOrderModal({
       commission: commVal,
       sourceAssetId: form.sourceAssetId,
       sourceKey: order?.sourceKey || `${form.date}|${form.type}|${symbol}|${quantity}|${form.unitPrice}|${totalPrice}`,
-      time: order?.time || "00:00:00",
+      // Preserve a stored time, but do not invent one for a new order.
+      time: order?.time,
     });
     onClose();
   };
@@ -1423,12 +1425,14 @@ export function StockOrderModal({
 export function StockSymbolTradesModal({
   symbol,
   orders,
+  dayOrder,
   cashAccounts,
   onClose,
   onEditOrder,
 }: {
   symbol: string;
   orders: StockOrder[];
+  dayOrder?: PortfolioData["settings"]["transactionDayOrder"];
   cashAccounts: Asset[];
   onClose: () => void;
   onEditOrder: (order: StockOrder) => void;
@@ -1437,7 +1441,10 @@ export function StockSymbolTradesModal({
 
   const list = orders
     .filter((item) => item.symbol === symbol)
-    .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+    .sort((a, b) => (b.date || "").localeCompare(a.date || "") ||
+      compareRowsWithinDay(dayOrder,
+        { date: a.date, orderKey: ledgerRowKey("stockOrder", a.id) },
+        { date: b.date, orderKey: ledgerRowKey("stockOrder", b.id) }));
 
   return (
     <>
@@ -1850,7 +1857,11 @@ export function AssetTransactionsModal({
   const assetTxs = transactions
     .filter((tx) => tx.assetId === asset.id)
     .sort((a, b) => Number(b.id === focusTransactionId) - Number(a.id === focusTransactionId) ||
-      (b.date || "").localeCompare(a.date || "") || (b.createdAt || "").localeCompare(a.createdAt || ""));
+      (b.date || "").localeCompare(a.date || "") ||
+      compareRowsWithinDay(data.settings.transactionDayOrder,
+        { date: a.date, orderKey: ledgerRowKey("transaction", a.id) },
+        { date: b.date, orderKey: ledgerRowKey("transaction", b.id) }) ||
+      (b.createdAt || "").localeCompare(a.createdAt || ""));
 
   const filteredTxs = assetTxs.filter((tx) => {
     if (filterType !== "all" && tx.type !== filterType) return false;
@@ -1875,8 +1886,11 @@ export function AssetTransactionsModal({
     }
   }
 
-  const orders = [...(stockOrders || [])].sort(
-    (a, b) => (b.date || "").localeCompare(a.date || "")
+  const orders = [...(stockOrders || [])].sort((a, b) =>
+    (b.date || "").localeCompare(a.date || "") ||
+    compareRowsWithinDay(data.settings.transactionDayOrder,
+      { date: a.date, orderKey: ledgerRowKey("stockOrder", a.id) },
+      { date: b.date, orderKey: ledgerRowKey("stockOrder", b.id) })
   );
 
   const filteredOrders = orders.filter((order) => {

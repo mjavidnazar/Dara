@@ -106,6 +106,9 @@ export interface AppSettings {
   hamiStatementLedgerMigrated?: boolean;
   bankClearingHidden?: boolean;
   kianStockMigrated?: boolean;
+  // Presentation order of transactions and stock orders within each date.
+  // This is not a trade timestamp or evidence of the real settlement sequence.
+  transactionDayOrder?: Record<string, string[]>;
 }
 
 export interface PortfolioData {

@@ -1,6 +1,7 @@
 "use client";
 
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -20,6 +21,7 @@ import {
   FileDown,
   FileText,
   FileUp,
+  GripVertical,
   HardDrive,
   Loader2,
   Minus,
@@ -44,6 +46,8 @@ import { InfoButton } from "./InfoGuide";
 import type { AuditTarget, CapitalReport } from "../lib/capitalReport";
 import { indexTransactionReviews } from "../lib/transactionReviews";
 import type { TransactionReview } from "../lib/transactionReviews";
+import { compareRowsWithinDay, ledgerRowKey } from "../lib/transactionDayOrder";
+import type { DayRowPosition } from "../lib/transactionDayOrder";
 import { JalaliDatePicker } from "./JalaliDatePicker";
 import {
   StockDividendModal,
@@ -200,9 +204,13 @@ export function DashboardView({
   const recentTransactions = useMemo(
     () =>
       [...data.transactions]
-        .sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.createdAt || "").localeCompare(a.createdAt || ""))
+        .sort((a, b) => (b.date || "").localeCompare(a.date || "") ||
+          compareRowsWithinDay(data.settings.transactionDayOrder,
+            { date: a.date, orderKey: ledgerRowKey("transaction", a.id) },
+            { date: b.date, orderKey: ledgerRowKey("transaction", b.id) }) ||
+          (b.createdAt || "").localeCompare(a.createdAt || ""))
         .slice(0, 5),
-    [data.transactions]
+    [data.transactions, data.settings.transactionDayOrder]
   );
 
   const [timelineRange, setTimelineRange] = useState<ChartTimeRange>("all");
@@ -1908,6 +1916,7 @@ export function StocksDashboardView({
         <StockSymbolTradesModal
           symbol={selectedSymbol}
           orders={data.stockOrders}
+          dayOrder={data.settings.transactionDayOrder}
           cashAccounts={data.assets.filter((asset) => assetMode(asset) === "cash")}
           onClose={() => setSelectedSymbol(null)}
           onEditOrder={onEditOrder}
@@ -2260,6 +2269,7 @@ export function TransactionsView({
   onAdd,
   onEdit,
   onDelete,
+  onReorder,
   onCsv,
   onPdf,
   onStockImport,
@@ -2276,6 +2286,7 @@ export function TransactionsView({
   onAdd: () => void;
   onEdit: (tx: Transaction) => void;
   onDelete: (tx: Transaction) => void;
+  onReorder?: (sourceKey: string, targetKey: string, position: DayRowPosition) => void;
   onCsv: () => void;
   onPdf: () => void;
   onStockImport: () => void;
@@ -2327,6 +2338,7 @@ export function TransactionsView({
 
   interface UnifiedRow {
     id: string;
+    orderKey: string;
     sourceType: "stock_order" | "hami_settlement" | "regular";
     type: "buy" | "sell";
     assetId: string;
@@ -2357,6 +2369,7 @@ export function TransactionsView({
       const commissionText = order.commission ? ` · کارمزد: ${money(order.commission)}` : "";
       return {
         id: `stock-${order.id}`,
+        orderKey: ledgerRowKey("stockOrder", order.id),
         sourceType: "stock_order",
         type: order.type,
         assetId: bourseId,
@@ -2392,6 +2405,7 @@ export function TransactionsView({
 
       return {
         id: tx.id,
+        orderKey: ledgerRowKey("transaction", tx.id),
         sourceType: isHamiSettlement ? "hami_settlement" : "regular",
         type: tx.type,
         assetId: tx.assetId,
@@ -2459,7 +2473,10 @@ export function TransactionsView({
     return [...filtered].sort((a, b) => {
       let cmp = 0;
       if (txSortKey === "date") {
-        cmp = (a.date || "").localeCompare(b.date || "");
+        // The saved same-day order is independent of ascending/descending dates.
+        const dateCmp = (a.date || "").localeCompare(b.date || "");
+        return dateCmp ? (txSortDir === "asc" ? dateCmp : -dateCmp)
+          : compareRowsWithinDay(data.settings.transactionDayOrder, a, b);
       } else if (txSortKey === "type") {
         cmp = a.type.localeCompare(b.type);
       } else if (txSortKey === "asset") {
@@ -2475,7 +2492,158 @@ export function TransactionsView({
       }
       return txSortDir === "asc" ? cmp : -cmp;
     });
-  }, [filtered, txSortKey, txSortDir]);
+  }, [filtered, txSortKey, txSortDir, data.settings.transactionDayOrder]);
+
+  const orderKeyCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const row of allRows) counts.set(row.orderKey, (counts.get(row.orderKey) || 0) + 1);
+    return counts;
+  }, [allRows]);
+  const hasSameDayRows = useMemo(() => {
+    const seen = new Set<string>();
+    return allRows.some((row) => {
+      if (!validIsoDate(row.date)) return false;
+      if (seen.has(row.date)) return true;
+      seen.add(row.date);
+      return false;
+    });
+  }, [allRows]);
+  const ambiguousDays = useMemo(() => {
+    const seenByDate = new Map<string, Set<string>>();
+    const ambiguous = new Set<string>();
+    for (const row of allRows) {
+      const keys = seenByDate.get(row.date) || new Set<string>();
+      if (keys.has(row.orderKey)) ambiguous.add(row.date);
+      keys.add(row.orderKey);
+      seenByDate.set(row.date, keys);
+    }
+    return ambiguous;
+  }, [allRows]);
+  const canReorderRow = (row: UnifiedRow) =>
+    Boolean(onReorder) && txSortKey === "date" && validIsoDate(row.date) &&
+    !ambiguousDays.has(row.date) &&
+    Boolean(row.sourceType === "stock_order" ? row.stockOrder?.id : row.rawTx?.id) &&
+    orderKeyCounts.get(row.orderKey) === 1;
+  const movableDayCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    if (txSortKey !== "date" || !onReorder) return counts;
+    for (const row of sortedTransactions) {
+      const id = row.sourceType === "stock_order" ? row.stockOrder?.id : row.rawTx?.id;
+      if (id && validIsoDate(row.date) && !ambiguousDays.has(row.date) && orderKeyCounts.get(row.orderKey) === 1) {
+        counts.set(row.date, (counts.get(row.date) || 0) + 1);
+      }
+    }
+    return counts;
+  }, [sortedTransactions, orderKeyCounts, ambiguousDays, txSortKey, onReorder]);
+
+  type DragSession = {
+    pointerId: number;
+    handle: HTMLButtonElement;
+    sourceKey: string;
+    date: string;
+    startX: number;
+    startY: number;
+    x: number;
+    y: number;
+    moved: boolean;
+    targetKey: string | null;
+    position: DayRowPosition | null;
+  };
+  const activeDrag = useRef<DragSession | null>(null);
+  const dragScrollFrame = useRef<number | null>(null);
+  const [dragPreview, setDragPreview] = useState<{
+    sourceKey: string; targetKey: string | null; position: DayRowPosition | null;
+  } | null>(null);
+  const [orderAnnouncement, setOrderAnnouncement] = useState("");
+  useEffect(() => () => {
+    if (dragScrollFrame.current !== null) window.cancelAnimationFrame(dragScrollFrame.current);
+    activeDrag.current = null;
+  }, []);
+
+  const moveLedgerRow = (sourceKey: string, targetKey: string, position: DayRowPosition, date: string) => {
+    onReorder?.(sourceKey, targetKey, position);
+    const source = allRows.find((row) => row.orderKey === sourceKey)?.assetName || "معامله";
+    const target = allRows.find((row) => row.orderKey === targetKey)?.assetName || "ردیف دیگر";
+    setOrderAnnouncement(`ترتیب نمایش ${toPersianDate(date)}: ${source} ${position === "before" ? "بالای" : "پایینِ"} ${target} قرار گرفت.`);
+  };
+
+  const updateDropTarget = (drag: DragSession) => {
+    const tr = document.elementFromPoint(drag.x, drag.y)?.closest<HTMLTableRowElement>("tr[data-ledger-key]");
+    const targetKey = tr?.dataset.ledgerKey;
+    const validTarget = tr?.closest("table.transaction-ledger-table") &&
+      tr.dataset.ledgerDate === drag.date && targetKey !== drag.sourceKey &&
+      targetKey && orderKeyCounts.get(targetKey) === 1;
+    const nextKey = validTarget ? targetKey : null;
+    const position = nextKey && tr
+      ? drag.y < tr.getBoundingClientRect().top + tr.getBoundingClientRect().height / 2 ? "before" : "after"
+      : null;
+    if (drag.targetKey !== nextKey || drag.position !== position) {
+      drag.targetKey = nextKey;
+      drag.position = position;
+      setDragPreview({ sourceKey: drag.sourceKey, targetKey: nextKey, position });
+    }
+  };
+
+  // Pointer capture works for mouse, pen and touch. Only the grip prevents touch
+  // scrolling; swiping anywhere else in the table keeps normal mobile scrolling.
+  const autoScrollDrag = () => {
+    dragScrollFrame.current = null;
+    const drag = activeDrag.current;
+    if (!drag || !drag.moved) return;
+    const edge = 100;
+    const speed = drag.y < edge ? -Math.min(16, (edge - drag.y) / 4)
+      : drag.y > window.innerHeight - edge ? Math.min(16, (drag.y - window.innerHeight + edge) / 4) : 0;
+    if (speed) {
+      const before = window.scrollY;
+      window.scrollBy(0, speed);
+      if (window.scrollY !== before) updateDropTarget(drag);
+    }
+    dragScrollFrame.current = window.requestAnimationFrame(autoScrollDrag);
+  };
+
+  const finishDrag = () => {
+    const drag = activeDrag.current;
+    activeDrag.current = null;
+    if (dragScrollFrame.current !== null) window.cancelAnimationFrame(dragScrollFrame.current);
+    dragScrollFrame.current = null;
+    setDragPreview(null);
+    if (drag?.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId);
+  };
+
+  const onOrderPointerDown = (event: ReactPointerEvent<HTMLButtonElement>, row: UnifiedRow) => {
+    if (!canReorderRow(row) || (event.pointerType === "mouse" && event.button !== 0)) return;
+    event.preventDefault();
+    if (activeDrag.current) finishDrag();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    activeDrag.current = {
+      pointerId: event.pointerId, handle: event.currentTarget, sourceKey: row.orderKey,
+      date: row.date, startX: event.clientX, startY: event.clientY,
+      x: event.clientX, y: event.clientY, moved: false, targetKey: null, position: null,
+    };
+    setDragPreview({ sourceKey: row.orderKey, targetKey: null, position: null });
+  };
+  const onOrderPointerMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = activeDrag.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    drag.x = event.clientX;
+    drag.y = event.clientY;
+    if (!drag.moved && Math.hypot(drag.x - drag.startX, drag.y - drag.startY) < 6) return;
+    drag.moved = true;
+    updateDropTarget(drag);
+    if (dragScrollFrame.current === null) dragScrollFrame.current = window.requestAnimationFrame(autoScrollDrag);
+  };
+  const onOrderPointerUp = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = activeDrag.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (drag.moved) {
+      drag.x = event.clientX;
+      drag.y = event.clientY;
+      updateDropTarget(drag);
+    }
+    const { sourceKey, targetKey, position, date } = drag;
+    finishDrag();
+    if (targetKey && position && txSortKey === "date") moveLedgerRow(sourceKey, targetKey, position, date);
+  };
 
   // When viewing "All", avoid double-counting stock buy vs hami cash withdrawal for stats
   const totalSum = useMemo(() => {
@@ -2828,8 +2996,26 @@ export function TransactionsView({
           <p>شمارش برای کل دفتر است؛ فیلتر بالا فقط ردیف‌های دلخواه را نشان می‌دهد. این نشان‌ها نتیجهٔ کنترل هستند، نه اثبات اشتباه ردیف. فقط پس از تطبیق با سند ویرایش کنید؛ موارد مربوط به قیمت، سود مجمع و کل سرمایه در گزارش کامل‌اند.</p>
           {onShowReport && <button type="button" className="button ghost small-btn" onClick={onShowReport}>گزارش کامل سرمایه</button>}
         </div>
+        {onReorder && hasSameDayRows && (
+          <div className="transaction-order-guide" id="transaction-order-help">
+            <GripVertical size={18} aria-hidden="true" />
+            <p>
+              {txSortKey === "date"
+                ? "برای جابجایی ردیف‌های یک روز، دستگیره را بکشید یا دکمه‌های بالا و پایین را بزنید."
+                : "برای جابجایی ردیف‌های یک روز، ابتدا جدول را بر اساس تاریخ مرتب کنید."}
+              <small>ترتیب نمایش در این مرورگر و پشتیبان JSON ذخیره می‌شود؛ تاریخ، ساعت، مبلغ و محاسبات مالی تغییر نمی‌کنند. شناسهٔ تکراری مانع جابجایی آن ردیف و، اگر در همان روز تکرار شود، مانع جابجایی کل روز است.</small>
+              {hasActiveFilters && <small>فیلتر فعال است؛ جابجایی نسبت به ردیف‌های نمایان همان روز انجام می‌شود. برای دیدن همهٔ ردیف‌ها، فیلتر را بازنشانی کنید.</small>}
+            </p>
+            {txSortKey !== "date" && (
+              <button type="button" className="button secondary small-btn" onClick={() => { setTxSortKey("date"); setTxSortDir("desc"); }}>
+                مرتب‌سازی تاریخ
+              </button>
+            )}
+          </div>
+        )}
+        <span className="sr-only" role="status" aria-live="polite">{orderAnnouncement}</span>
         <div className="table-wrapper">
-          <table className="data-table">
+          <table className="data-table transaction-ledger-table">
             <thead>
               <tr>
                 <SortableHeader<TxSortKey>
@@ -2899,8 +3085,23 @@ export function TransactionsView({
                   const hasDuplicateId = Boolean(row.rawTx && duplicateTransactionIds.has(row.rawTx.id));
                   const canQuickEdit = isStockOrder || generatedSettlement
                     ? Boolean(row.stockOrder && onEditStockOrder) : Boolean(row.rawTx);
+                  const sameDayAbove = sortedTransactions[index - 1]?.date === row.date;
+                  const sameDayBelow = sortedTransactions[index + 1]?.date === row.date;
+                  const above = sameDayAbove && canReorderRow(sortedTransactions[index - 1]) ? sortedTransactions[index - 1] : null;
+                  const below = sameDayBelow && canReorderRow(sortedTransactions[index + 1]) ? sortedTransactions[index + 1] : null;
+                  const canDrag = canReorderRow(row) && (movableDayCounts.get(row.date) || 0) > 1;
+                  const orderLabel = `${row.assetName} در ${toPersianDate(row.date)}`;
                   return (
-                    <tr key={`${row.sourceType}-${row.id}-${index}`} className={row.review ? `transaction-review-row ${row.review.severity}` : undefined}>
+                    <tr
+                      key={orderKeyCounts.get(row.orderKey) === 1 ? row.orderKey : `${row.sourceType}-${row.id}-${index}`}
+                      data-ledger-key={row.orderKey}
+                      data-ledger-date={row.date}
+                      className={[
+                        row.review ? `transaction-review-row ${row.review.severity}` : "",
+                        dragPreview?.sourceKey === row.orderKey ? "transaction-dragging" : "",
+                        dragPreview?.targetKey === row.orderKey ? `transaction-drop-${dragPreview.position}` : "",
+                      ].filter(Boolean).join(" ") || undefined}
+                    >
                       <td>
                         <span className={`pill-badge ${row.type === "buy" ? "positive" : "negative"}`}>
                           {isStockOrder
@@ -2909,6 +3110,58 @@ export function TransactionsView({
                             ? row.type === "buy" ? "واریز فروش سهم" : "برداشت خرید سهم"
                             : row.type === "buy" ? "خرید / واریز" : "فروش / برداشت"}
                         </span>
+                        {onReorder && txSortKey === "date" && (sameDayAbove || sameDayBelow) && (
+                          <div className="transaction-order-controls" role="group" aria-label={`ترتیب ${orderLabel}`}>
+                            <button
+                              type="button"
+                              className="transaction-drag-handle"
+                              aria-label={`دستگیرهٔ جابجایی ${orderLabel} در همین روز؛ بکشید یا با صفحه‌کلید کلیدهای بالا و پایین را بزنید`}
+                              aria-describedby="transaction-order-help"
+                              title={canDrag ? "برای جابجایی در همین روز بکشید" : "جابجایی این ردیف ممکن نیست؛ شناسهٔ تکراری یا تاریخ نامعتبر را بررسی کنید"}
+                              disabled={!canDrag}
+                              onPointerDown={(event) => onOrderPointerDown(event, row)}
+                              onPointerMove={onOrderPointerMove}
+                              onPointerUp={onOrderPointerUp}
+                              onPointerCancel={finishDrag}
+                              onLostPointerCapture={(event) => {
+                                if (activeDrag.current?.pointerId === event.pointerId) finishDrag();
+                              }}
+                              onKeyDown={(event) => {
+                                if (event.key === "Escape" && activeDrag.current?.sourceKey === row.orderKey) finishDrag();
+                                if (event.key === "ArrowUp" && above) {
+                                  event.preventDefault();
+                                  moveLedgerRow(row.orderKey, above.orderKey, "before", row.date);
+                                }
+                                if (event.key === "ArrowDown" && below) {
+                                  event.preventDefault();
+                                  moveLedgerRow(row.orderKey, below.orderKey, "after", row.date);
+                                }
+                              }}
+                            >
+                              <GripVertical size={16} aria-hidden="true" />
+                            </button>
+                            <button
+                              type="button"
+                              className="transaction-order-up"
+                              aria-label={`بالا بردن ${orderLabel} در همین روز`}
+                              title="یک ردیف بالاتر در همین روز"
+                              disabled={!canReorderRow(row) || !above}
+                              onClick={() => { if (above) moveLedgerRow(row.orderKey, above.orderKey, "before", row.date); }}
+                            >
+                              <ArrowUp size={15} aria-hidden="true" />
+                            </button>
+                            <button
+                              type="button"
+                              className="transaction-order-down"
+                              aria-label={`پایین بردن ${orderLabel} در همین روز`}
+                              title="یک ردیف پایین‌تر در همین روز"
+                              disabled={!canReorderRow(row) || !below}
+                              onClick={() => { if (below) moveLedgerRow(row.orderKey, below.orderKey, "after", row.date); }}
+                            >
+                              <ArrowDown size={15} aria-hidden="true" />
+                            </button>
+                          </div>
+                        )}
                       </td>
                       <td>
                         <div className="transaction-review-asset">

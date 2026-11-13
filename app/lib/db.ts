@@ -1,6 +1,7 @@
 "use client";
 
 import type { PortfolioData } from "./types";
+import { sanitizeTransactionDayOrder } from "./transactionDayOrder";
 
 const LOCAL_STORAGE_KEY = "dara_portfolio_state_v4";
 
@@ -69,7 +70,8 @@ export function sanitizePortfolioData(data: unknown): PortfolioData | null {
           .map((o: any) => ({
             ...o,
             symbol: String(o.symbol || ""),
-            time: o.time || "00:00:00",
+            // An absent time is unknown, not a midnight trade. Reordering never fabricates one.
+            time: typeof o.time === "string" && o.time.trim() ? o.time : undefined,
             quantity: Number(o.quantity) || 0,
             unitPrice: Number(o.unitPrice) || 0,
             totalPrice: Number(o.totalPrice) || 0,
@@ -96,6 +98,7 @@ export function sanitizePortfolioData(data: unknown): PortfolioData | null {
       hamiStatementLedgerMigrated: Boolean(raw.settings?.hamiStatementLedgerMigrated),
       bankClearingHidden: Boolean(raw.settings?.bankClearingHidden),
       kianStockMigrated: Boolean(raw.settings?.kianStockMigrated),
+      transactionDayOrder: sanitizeTransactionDayOrder(raw.settings?.transactionDayOrder),
     },
   };
 }
