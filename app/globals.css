@@ -3132,7 +3132,7 @@ td { padding: 13px 10px; border-bottom: 1px solid #edf1ef; font-size: 10px; }
 .reports-optional { margin-top: 0; }
 .reports-optional > :not(summary) { margin-top: 18px; }
 
-/* The seven requested portfolio measures stay visible even while audit details are collapsed. */
+/* The eight portfolio measures stay visible even while audit details are collapsed. */
 .report-overview { border-color: var(--line); min-width: 0; }
 .report-overview-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
 .report-overview-head h2 { margin: 5px 0 4px; font-size: clamp(18px, 2.5vw, 23px); }

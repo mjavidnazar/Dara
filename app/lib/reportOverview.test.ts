@@ -58,7 +58,7 @@ function evaluated(data: PortfolioData) {
   return { audit, metrics, overview: calculateReportOverview(metrics, audit, market, profit) };
 }
 
-test("realized ratio uses gross contributions; new market-plus-realized ratio uses opening capital only", () => {
+test("the market ratios use their respective numerators and denominators without changing existing ratios", () => {
   const data = portfolio();
   const before = JSON.stringify(data);
   const { audit, overview, metrics } = evaluated(data);
@@ -74,6 +74,8 @@ test("realized ratio uses gross contributions; new market-plus-realized ratio us
   assert.equal(overview.currentValueAtPurchase, 1205); // cash at face 1005 + gold cost 100 + stock cost 100
   assert.equal(overview.realizedToCapitalPercent, 8.75);
   assert.equal(overview.marketPlusRealizedToInitialPercent, 137); // (1265 current cash/holdings + 105 realized) / 1000 opening
+  assert.ok(overview.marketPlusWithdrawalsAndRealizedToCapitalPercent !== null &&
+    Math.abs(overview.marketPlusWithdrawalsAndRealizedToCapitalPercent - 122.5) < 1e-9); // (1265 + 100 + 105) / (1000 + 200)
   assert.equal(overview.profitComponentsMatch, true);
   assert.equal(JSON.stringify(data), before, "the report must not modify transactions or quotes");
 
@@ -85,25 +87,63 @@ test("realized ratio uses gross contributions; new market-plus-realized ratio us
   assert.equal(fresh.currentMarketValue, 1295);
   assert.equal(fresh.combinedProfit, 200);
   assert.equal(fresh.marketPlusRealizedToInitialPercent, 140); // only market changes when today's quote changes
+  assert.ok(fresh.marketPlusWithdrawalsAndRealizedToCapitalPercent !== null &&
+    Math.abs(fresh.marketPlusWithdrawalsAndRealizedToCapitalPercent - 125) < 1e-9); // (1295 + 100 + 105) / 1200
+});
+
+test("only confirmed external withdrawals enter the new numerator, not the denominator", () => {
+  const data = portfolio();
+  const before = evaluated(data);
+  assert.equal(before.audit.withdrawals, 100, "linked gold and stock settlements are not external withdrawals");
+  const moreWithdrawn = { ...data, transactions: data.transactions.map((item) =>
+    item.id === "withdrawn" ? { ...item, quantity: 250, totalPrice: 250 } : item) };
+  const after = evaluated(moreWithdrawn);
+  assert.equal(after.audit.withdrawals, 250);
+  assert.equal(after.overview.currentMarketValue, 1115); // cash balance fell by 150
+  assert.equal(after.overview.grossCapital, 1200, "withdrawals never reduce gross contributed capital");
+  assert.equal(after.overview.realizedProfit, before.overview.realizedProfit);
+  assert.equal(after.overview.marketPlusWithdrawalsAndRealizedToCapitalPercent,
+    before.overview.marketPlusWithdrawalsAndRealizedToCapitalPercent,
+    "the extra 150 of confirmed withdrawals offsets 150 less cash; do not count the same exit twice");
+  assert.equal(after.overview.marketPlusRealizedToInitialPercent, 122,
+    "the existing card does not add external withdrawals");
 });
 
 test("unknown or zero opening capital never silently becomes a zero denominator or a made-up percentage", () => {
   const { metrics, overview } = evaluated(portfolio());
-  const missing = calculateReportOverview(metrics, { initialCapital: null, additionalCapital: 200 }, 1265, 170);
+  const missing = calculateReportOverview(metrics, { initialCapital: null, additionalCapital: 200, withdrawals: 0 }, 1265, 170);
   assert.equal(missing.grossCapital, null);
   assert.equal(missing.realizedToCapitalPercent, null);
   assert.equal(missing.marketPlusRealizedToInitialPercent, null);
+  assert.equal(missing.marketPlusWithdrawalsAndRealizedToCapitalPercent, null);
   assert.equal(missing.currentMarketValue, overview.currentMarketValue);
   assert.equal(missing.currentValueAtPurchase, overview.currentValueAtPurchase);
-  const empty = calculateReportOverview([], { initialCapital: 0, additionalCapital: 0 }, 0, 0);
+  const empty = calculateReportOverview([], { initialCapital: 0, additionalCapital: 0, withdrawals: 0 }, 0, 0);
   assert.equal(empty.grossCapital, 0);
   assert.equal(empty.realizedToCapitalPercent, null);
   assert.equal(empty.marketPlusRealizedToInitialPercent, null);
-  const onlyAdditional = calculateReportOverview([], { initialCapital: 0, additionalCapital: 200 }, 0, 0);
+  assert.equal(empty.marketPlusWithdrawalsAndRealizedToCapitalPercent, null);
+  const onlyAdditional = calculateReportOverview([], { initialCapital: 0, additionalCapital: 200, withdrawals: 0 }, 0, 0);
   assert.equal(onlyAdditional.grossCapital, 200);
   assert.equal(onlyAdditional.realizedToCapitalPercent, 0);
   assert.equal(onlyAdditional.marketPlusRealizedToInitialPercent, null, "later contributions cannot substitute for initial capital");
-  assert.equal(calculateReportOverview([], { initialCapital: null, additionalCapital: 0 }, 0, 0).grossCapital, null);
+  assert.equal(onlyAdditional.marketPlusWithdrawalsAndRealizedToCapitalPercent, 0,
+    "the new ratio explicitly includes later contributions in its denominator");
+  assert.equal(calculateReportOverview([], { initialCapital: null, additionalCapital: 0, withdrawals: 0 }, 0, 0).grossCapital, null);
+});
+
+test("invalid withdrawal amounts or unknown gross capital cannot produce the new ratio", () => {
+  const { metrics } = evaluated(portfolio());
+  for (const withdrawals of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+    const result = calculateReportOverview(metrics,
+      { initialCapital: 1000, additionalCapital: 200, withdrawals }, 1265, 170);
+    assert.equal(result.marketPlusWithdrawalsAndRealizedToCapitalPercent, null);
+    assert.equal(result.realizedToCapitalPercent, 8.75, "other indicators remain unchanged");
+    assert.equal(result.marketPlusRealizedToInitialPercent, 137);
+  }
+  const invalidCapital = calculateReportOverview(metrics,
+    { initialCapital: -100, additionalCapital: 200, withdrawals: 100 }, 1265, 170);
+  assert.equal(invalidCapital.marketPlusWithdrawalsAndRealizedToCapitalPercent, null);
 });
 
 test("cash debt stays signed, fully sold positions do not inflate the open-cost amount, and invalid totals are not displayed as zero", () => {
@@ -112,27 +152,32 @@ test("cash debt stays signed, fully sold positions do not inflate the open-cost 
     tx("buy", gold.id, "buy", 100, "2026-11-01", { quantity: 1, unitPrice: 100 }),
     tx("sell", gold.id, "sell", 120, "2026-11-02", { quantity: 1, unitPrice: 120 }),
   ], [], asOf)[0];
-  const result = calculateReportOverview([debt, sold], { initialCapital: 100, additionalCapital: 0 }, 20, 20);
+  const result = calculateReportOverview([debt, sold], { initialCapital: 100, additionalCapital: 0, withdrawals: 40 }, 20, 20);
   assert.equal(result.currentValueAtPurchase, -100, "debt is not clipped to zero; sold assets have no remaining book value");
   assert.equal(result.realizedProfit, 20);
   assert.equal(result.realizedToCapitalPercent, 20);
   assert.equal(result.marketPlusRealizedToInitialPercent, 40); // signed cash debt is included in the provided market total
-  const invalid = calculateReportOverview([debt, sold], { initialCapital: 100, additionalCapital: 0 }, Infinity, NaN);
+  assert.equal(result.marketPlusWithdrawalsAndRealizedToCapitalPercent, 80); // (20 + 40 + 20) / 100
+  const invalid = calculateReportOverview([debt, sold], { initialCapital: 100, additionalCapital: 0, withdrawals: 0 }, Infinity, NaN);
   assert.equal(invalid.currentMarketValue, null);
   assert.equal(invalid.combinedProfit, 20, "finite components can still be shown as raw while the dashboard is invalid");
   assert.equal(invalid.marketPlusRealizedToInitialPercent, null);
+  assert.equal(invalid.marketPlusWithdrawalsAndRealizedToCapitalPercent, null);
   assert.equal(invalid.profitComponentsMatch, false);
   const broken = calculateReportOverview([{ ...sold, realizedProfit: NaN }],
-    { initialCapital: 100, additionalCapital: 0 }, 20, 20);
+    { initialCapital: 100, additionalCapital: 0, withdrawals: 0 }, 20, 20);
   assert.equal(broken.realizedProfit, null);
   assert.equal(broken.combinedProfit, null);
   assert.equal(broken.realizedToCapitalPercent, null);
   assert.equal(broken.marketPlusRealizedToInitialPercent, null);
+  assert.equal(broken.marketPlusWithdrawalsAndRealizedToCapitalPercent, null);
   assert.equal(broken.profitComponentsMatch, false);
   const overflowingNumerator = calculateReportOverview([{ ...sold, realizedProfit: Number.MAX_VALUE }],
-    { initialCapital: 100, additionalCapital: 0 }, Number.MAX_VALUE, Number.MAX_VALUE);
+    { initialCapital: 100, additionalCapital: 0, withdrawals: 0 }, Number.MAX_VALUE, Number.MAX_VALUE);
   assert.equal(overflowingNumerator.marketPlusRealizedToInitialPercent, null,
     "an overflowing market-plus-realized numerator must not display a fabricated percentage");
+  assert.equal(overflowingNumerator.marketPlusWithdrawalsAndRealizedToCapitalPercent, null,
+    "overflow cannot produce a fabricated new percentage either");
 });
 
 test("copy-trading snapshots use recorded capital cost rather than treating a changed USD balance as a cash withdrawal", () => {
@@ -142,7 +187,7 @@ test("copy-trading snapshots use recorded capital cost rather than treating a ch
   assert.equal(metric.marketValue, 250);
   assert.equal(metric.averageCost * metric.quantity, 150);
   assert.equal(metric.costBasis, 300);
-  const overview = calculateReportOverview([metric], { initialCapital: 300, additionalCapital: 0 }, metric.marketValue, metric.totalProfit);
+  const overview = calculateReportOverview([metric], { initialCapital: 300, additionalCapital: 0, withdrawals: 0 }, metric.marketValue, metric.totalProfit);
   assert.equal(overview.currentValueAtPurchase, 300);
   assert.equal(overview.combinedProfit, -50);
 });
@@ -156,7 +201,7 @@ test("an inconsistent legacy profit breakdown is flagged rather than presented a
   ], [], asOf);
   assert.equal(metric.realizedProfit, 50);
   assert.equal(metric.totalProfit, 0); // existing special-account calculation is inconsistent here
-  const overview = calculateReportOverview([metric], { initialCapital: 100, additionalCapital: 0 }, metric.marketValue, metric.totalProfit);
+  const overview = calculateReportOverview([metric], { initialCapital: 100, additionalCapital: 0, withdrawals: 0 }, metric.marketValue, metric.totalProfit);
   assert.equal(overview.realizedProfit, 50);
   assert.equal(overview.combinedProfit, 50, "the requested indicator sums realized and unrealized even when the dashboard disagrees");
   assert.equal(overview.profitComponentsMatch, false);
@@ -165,7 +210,7 @@ test("an inconsistent legacy profit breakdown is flagged rather than presented a
   const compensatingErrors = metrics.map((item, index) => index < 2
     ? { ...item, totalProfit: item.totalProfit + (index === 0 ? 10 : -10) }
     : item);
-  assert.equal(calculateReportOverview(compensatingErrors, { initialCapital: 100, additionalCapital: 0 },
+  assert.equal(calculateReportOverview(compensatingErrors, { initialCapital: 100, additionalCapital: 0, withdrawals: 0 },
     1265, 170).profitComponentsMatch, false, "equal aggregate totals must not hide mismatched positions");
 });
 
@@ -175,7 +220,7 @@ const card = (markup: string, id: string) => {
   return match[0];
 };
 
-test("all seven indicators are immediately visible in ReportsView, above the collapsible audit details", () => {
+test("all eight indicators are immediately visible in ReportsView, above the collapsible audit details", () => {
   const data = portfolio();
   const { audit, metrics, overview } = evaluated(data);
   const markup = renderToStaticMarkup(createElement(ReportsView, {
@@ -185,7 +230,7 @@ test("all seven indicators are immediately visible in ReportsView, above the col
   }));
   const ids = [...markup.matchAll(/data-report-metric="([^"]+)"/g)].map((match) => match[1]);
   assert.deepEqual(ids, ["gross-capital", "realized-profit", "combined-profit", "market-value",
-    "purchase-value", "realized-ratio", "market-ratio"]);
+    "purchase-value", "realized-ratio", "market-ratio", "market-withdrawals-ratio"]);
   assert.ok(markup.indexOf('data-report-metric="gross-capital"') <
     markup.indexOf('class="capital-technical reports-optional"'), "overview is outside the optional details");
   assert.ok(card(markup, "gross-capital").includes(money(1200)));
@@ -200,7 +245,14 @@ test("all seven indicators are immediately visible in ReportsView, above the col
   assert.match(realizedRatioCard, /۸٫۷۵٪/);
   assert.match(card(markup, "market-ratio"), /۱۳۷٪/);
   assert.match(card(markup, "market-ratio"), /مخرج: فقط سرمایهٔ اولیه، بدون آورده‌های بعدی/);
-  assert.match(markup, /در نسبت آخر، سودِ باقی‌مانده در نقد ممکن است دوباره شمرده شود/);
+  const withdrawalsCard = card(markup, "market-withdrawals-ratio");
+  assert.match(withdrawalsCard, /نسبت \(ارزش روز دارایی‌ها \+ برداشت بیرونی \+ سود محقق‌شده\) به \(سرمایهٔ اولیه \+ آورده‌های بعدی\)/);
+  assert.match(withdrawalsCard, /۱۲۲٫۵٪/);
+  assert.match(withdrawalsCard, /مخرج: سرمایهٔ اولیه \+ آورده‌های بعدی · برداشت بیرونی در صورت:/);
+  assert.ok(withdrawalsCard.includes(money(100)), "the confirmed external withdrawal is shown on the card");
+  assert.match(withdrawalsCard, /aria-label="توضیحات و نحوه محاسبه:/);
+  assert.match(markup, /سودِ باقی‌مانده در نقد ممکن است دوباره شمرده شود/);
+  assert.match(markup, /برداشت‌ها از هیچ مخرجی کسر نمی‌شوند/);
   assert.match(markup, /برداشت:.*کسر نشده/);
 });
 
@@ -212,6 +264,7 @@ test("UI distinguishes raw, unreconciled figures and never displays a made-up pe
   assert.match(raw, /اعداد خام؛ نیازمند بررسی/);
   assert.match(raw, /نتیجهٔ قطعی نیستند/);
   assert.match(card(raw, "realized-ratio"), /۸٫۷۵٪/);
+  assert.match(card(raw, "market-withdrawals-ratio"), /۱۲۲٫۵٪/);
 
   const divergent = renderToStaticMarkup(createElement(ReportOverviewPanel, {
     overview: { ...overview, profitComponentsMatch: false }, report: audit,
@@ -226,7 +279,7 @@ test("UI distinguishes raw, unreconciled figures and never displays a made-up pe
     overview: missingOverview, report: missingReport,
   }));
   assert.match(card(missing, "gross-capital"), /نامشخص/);
-  for (const id of ["realized-ratio", "market-ratio"]) {
+  for (const id of ["realized-ratio", "market-ratio", "market-withdrawals-ratio"]) {
     assert.match(card(missing, id), /report-overview-value[^>]*>—<\/strong>/);
   }
 });

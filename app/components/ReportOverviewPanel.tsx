@@ -6,7 +6,7 @@ import { money, nf, signedMoney } from "../lib/portfolio";
 import { InfoButton } from "./InfoGuide";
 
 type MetricId = "gross-capital" | "realized-profit" | "combined-profit" | "market-value" |
-  "purchase-value" | "realized-ratio" | "market-ratio";
+  "purchase-value" | "realized-ratio" | "market-ratio" | "market-withdrawals-ratio";
 
 function ReportMetricCard({
   id, title, value, detail, formula, description, tone,
@@ -44,6 +44,13 @@ export function ReportOverviewPanel({ overview, report }: { overview: ReportOver
     ? "تا ثبت سرمایهٔ اولیه، مخرج معلوم نیست."
     : !Number.isFinite(report.initialCapital) || report.initialCapital <= 0
       ? "سرمایهٔ اولیه باید مثبت باشد." : "مخرج: فقط سرمایهٔ اولیه، بدون آورده‌های بعدی";
+  const withdrawalsRatioDetail = overview.grossCapital === null
+    ? "تا ثبت سرمایهٔ اولیه، مخرج معلوم نیست."
+    : overview.grossCapital <= 0
+      ? "کل سرمایه باید مثبت باشد."
+      : !Number.isFinite(report.withdrawals) || report.withdrawals < 0
+        ? "مبلغ برداشت بیرونی نامعتبر است."
+        : `مخرج: سرمایهٔ اولیه + آورده‌های بعدی · برداشت بیرونی در صورت: ${money(report.withdrawals)}`;
 
   return (
     <section className="panel-card report-overview" aria-labelledby="report-overview-heading">
@@ -133,10 +140,19 @@ export function ReportOverviewPanel({ overview, report }: { overview: ReportOver
           formula="نسبت = ((ارزش روز دارایی‌ها و ماندهٔ نقدی + کل سود / زیان محقق‌شده) ÷ سرمایهٔ اولیه) × ۱۰۰"
           description="طبق فرمول درخواستی، آورده‌های بعدی و برداشت‌ها در مخرج این نسبت نیستند. سود محقق‌شده‌ای که هنوز در حساب نقدی است ممکن است از قبل در ارزش روز باشد و با این جمع دوبار شمرده شود؛ این نسبت بازدهی خالص یا ارزش واقعی سبد نیست. اگر سرمایهٔ اولیه مثبت و معتبر نباشد درصد نمایش داده نمی‌شود."
         />
+        <ReportMetricCard
+          id="market-withdrawals-ratio"
+          title="نسبت (ارزش روز دارایی‌ها + برداشت بیرونی + سود محقق‌شده) به (سرمایهٔ اولیه + آورده‌های بعدی)"
+          value={displayRatio(overview.marketPlusWithdrawalsAndRealizedToCapitalPercent)}
+          detail={withdrawalsRatioDetail}
+          formula="نسبت = ((ارزش روز دارایی‌ها و ماندهٔ نقدی + برداشت بیرونی ثبت‌شده + سود / زیان محقق‌شده) ÷ (سرمایهٔ اولیه + آورده‌های بعدی)) × ۱۰۰"
+          description="فقط برداشت واقعی از سبد در صورت جمع می‌شود؛ جابه‌جایی پول بین حساب‌ها و خریدوفروش داخلی برداشت بیرونی نیست. برداشت از مخرج کم نمی‌شود. سود محقق‌شده ممکن است از قبل در ماندهٔ نقدیِ ارزش روز باشد و دوباره شمرده شود؛ این شاخص بازده خالص یا سالانه نیست. بدون مخرج مثبت و مبالغ معتبر، درصد نمایش داده نمی‌شود."
+        />
       </div>
       <p className="report-overview-footnote">
-        مخرج نسبت سود محقق‌شده، «سرمایهٔ اولیه + آورده‌های بعدی» و مخرج نسبت آخر، فقط «سرمایهٔ اولیه» است؛ برداشت‌ها از هیچ‌کدام کسر نمی‌شوند.
-        ارزش خریدِ موجودی فعلی شامل ماندهٔ نقدی با ارزش اسمی است. در نسبت آخر، سودِ باقی‌مانده در نقد ممکن است دوباره شمرده شود؛ آن را بازدهی خالص تلقی نکنید.
+        مخرج نسبت سود محقق‌شده و نسبتِ شامل برداشت بیرونی، «سرمایهٔ اولیه + آورده‌های بعدی» است؛ مخرج نسبت «ارزش روز + سود محقق‌شده» فقط «سرمایهٔ اولیه» است.
+        برداشت‌ها از هیچ مخرجی کسر نمی‌شوند و فقط به صورتِ کارت جدید اضافه می‌شوند. ارزش خریدِ موجودی فعلی شامل ماندهٔ نقدی با ارزش اسمی است.
+        در دو نسبتِ شامل سود محقق‌شده و ارزش روز، سودِ باقی‌مانده در نقد ممکن است دوباره شمرده شود؛ آن‌ها را بازدهی خالص تلقی نکنید.
       </p>
     </section>
   );
