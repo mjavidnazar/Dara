@@ -3,8 +3,8 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AssetsView } from "../components/Views";
-import { metricsAt, money, percent } from "./portfolio";
-import type { Asset, Transaction } from "./types";
+import { calculateBourseSummary, metricsAt, money, percent, stockMetrics, toPersianDate } from "./portfolio";
+import type { Asset, StockOrder, Transaction } from "./types";
 
 const asOf = "2026-11-11";
 const tether: Asset = {
@@ -51,7 +51,8 @@ test("a fully sold profitable asset uses all purchase costs, not its zero remain
   assert.equal(JSON.stringify(transactions), before, "valuation must not rewrite the ledger");
 
   const markup = renderToStaticMarkup(createElement(AssetsView, {
-    metrics: [item], onAdd: () => {}, onPrice: () => {}, onUpdateCopy: () => {}, onDelete: () => {},
+    metrics: [item], stockSummary: calculateBourseSummary(),
+    onAdd: () => {}, onPrice: () => {}, onUpdateCopy: () => {}, onDelete: () => {},
   }));
   assert.ok(markup.includes(`>${percent(50)}</span>`), "Assets card shows the corrected ratio");
   assert.ok(!markup.includes(">+۱۰۰٪</span>"), "Assets card must not fabricate a 100% gain");
@@ -61,18 +62,50 @@ test("a fully sold profitable asset uses all purchase costs, not its zero remain
   assert.ok(markup.includes(money(150)), "realized profit is unchanged");
 });
 
-test("the stock-portfolio card does not claim its zero direct-asset purchases are the stock return denominator", () => {
+test("the Bourse asset badge equals ratio 3, using peak open stock cost rather than total purchases or current cost", () => {
   const bourse: Asset = { ...tether, id: "bourse", name: "بورس", category: "بورس", currentPrice: 0 };
+  const orders: StockOrder[] = [
+    { id: "open-buy", symbol: "الف", type: "buy", quantity: 2, unitPrice: 100, totalPrice: 200, date: "2026-11-01" },
+    { id: "partial-sale", symbol: "الف", type: "sell", quantity: 1, unitPrice: 130, totalPrice: 130, date: "2026-11-02" },
+    { id: "closed-buy", symbol: "ب", type: "buy", quantity: 1, unitPrice: 50, totalPrice: 50, date: "2026-11-03" },
+    { id: "closed-sale", symbol: "ب", type: "sell", quantity: 1, unitPrice: 40, totalPrice: 40, date: "2026-11-04" },
+  ];
+  const summary = calculateBourseSummary(stockMetrics(orders, [
+    { id: "quote", symbol: "الف", date: "2026-11-05", price: 125 },
+  ]), orders);
+  assert.equal(summary.peakOpenCost, 200);
+  assert.equal(summary.purchases, 250);
+  assert.equal(summary.currentCost, 100);
+  assert.equal(summary.toDateProfit, 45); // 20 realized + 25 on the remaining share
+  assert.equal(summary.toDateReturnPercent, 22.5); // 45 / 200, not 45 / 250 or / 100
+
+  // The page mirrors stockSummary onto the placeholder metric, but even a stale
+  // metric must not make this badge disagree with ratio 3 in the stock desk.
   const [raw] = metricsAt([bourse], [], [], asOf);
-  // The stock desk calculates this percent from stock orders; presentation metrics
-  // replace the placeholder asset's value, while its direct trades remain empty.
-  const item = { ...raw, marketValue: 120, costBasis: 100, totalProfit: 20, unrealizedProfit: 20, profitPercent: 20 };
+  const item = { ...raw, marketValue: summary.currentValue, costBasis: summary.currentCost,
+    totalProfit: summary.toDateProfit, profitPercent: -99 };
   const markup = renderToStaticMarkup(createElement(AssetsView, {
-    metrics: [item], onAdd: () => {}, onPrice: () => {}, onUpdateCopy: () => {}, onDelete: () => {},
+    metrics: [item], stockSummary: summary,
+    onAdd: () => {}, onPrice: () => {}, onUpdateCopy: () => {}, onDelete: () => {},
   }));
-  assert.ok(markup.includes(`>${percent(20)}</span>`));
-  assert.ok(markup.includes("سفارش‌های سهام"), "stock tooltip names its actual source of purchases");
+  assert.ok(markup.includes(`>${percent(summary.toDateReturnPercent)}</span>`));
+  assert.ok(!markup.includes(`>${percent(item.profitPercent)}</span>`), "stale asset metrics cannot alter the Bourse ratio");
+  assert.match(markup, /pill-badge positive[^>]*>/);
+  assert.ok(markup.includes(money(summary.peakOpenCost)));
+  assert.ok(markup.includes(toPersianDate(summary.peakOpenCostDate!)));
+  assert.match(markup, /همان نسبت سوم میزکار/);
+  assert.doesNotMatch(markup, /سود کل بورس نسبت به جمع مبالغ خرید/);
   assert.ok(!markup.includes("جمع بهای خریدهای ثبت‌شده: ۰ تومان"), "no made-up zero denominator for stocks");
+});
+
+test("without a valid stock purchase, the Bourse badge shows unavailable just like ratio 3", () => {
+  const bourse: Asset = { ...tether, id: "bourse", name: "بورس", category: "بورس", currentPrice: 0 };
+  const [item] = metricsAt([bourse], [], [], asOf);
+  const markup = renderToStaticMarkup(createElement(AssetsView, {
+    metrics: [item], stockSummary: calculateBourseSummary(),
+    onAdd: () => {}, onPrice: () => {}, onUpdateCopy: () => {}, onDelete: () => {},
+  }));
+  assert.match(markup, /pill-badge neutral[^>]*>—<\/span>/);
 });
 
 test("a fully sold losing asset shows its loss percentage instead of zero", () => {

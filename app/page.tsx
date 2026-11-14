@@ -931,6 +931,7 @@ export default function App() {
           {view === "assets" && (
             <AssetsView
               metrics={presentationMetrics}
+              stockSummary={stockSummary}
               onAdd={() => {
                 setEditingAsset(null);
                 setAssetModal(true);

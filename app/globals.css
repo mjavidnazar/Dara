@@ -121,11 +121,11 @@ button { cursor: pointer; }
 .hero-metrics .metric-card:nth-child(4)::after { content: "پول نقد در دسترس برابر جمع ماندهٔ بانک، صندوق حامی، صندوق کیان و دفتر گواهی سپرده است."; }
 .stock-kpis > div:nth-child(1)::after { content: "موجودی فعلی بورس: ارزش روز نمادهای دارای موجودی. سود/زیان آن با بهای تمام‌شدهٔ همین نمادها مقایسه می‌شود."; }
 .stock-kpis > div:nth-child(2)::after { content: "ماندهٔ حامی: واریزهای کارگزاری، فروش سهام و سود حامی، منهای خریدهای سهام و برداشت‌ها."; }
-.stock-kpis > div:nth-child(3)::after { content: "سود/زیان محقق‌شده: سود فروش سهام + همهٔ مجامع پرداخت‌شده؛ نسبت آن بر مجموع خریدهای سهام تقسیم می‌شود."; }
+.stock-kpis > div:nth-child(3)::after { content: "سود/زیان محقق‌شده: سود فروش سهام + همهٔ مجامع پرداخت‌شده؛ نسبت آن بر بیشترین بهای سهام هم‌زمان موجود در پایان روز تقسیم می‌شود."; }
 .stock-kpis > div:nth-child(4)::after { content: "سود مجمعِ ثبت‌شده را به تفکیک پرداخت‌شده و در انتظار نشان می‌دهد."; }
-.stock-kpis > div:nth-child(5)::after { content: "سود کل بورس: سود فروش + سود جاری سهام موجود + همهٔ مجامع؛ نسبت آن بر مجموع خریدهای سهام تقسیم می‌شود."; }
+.stock-kpis > div:nth-child(5)::after { content: "سود کل بورس: سود فروش + سود جاری سهام موجود + همهٔ مجامع؛ نسبت آن بر بیشترین بهای سهام هم‌زمان موجود در پایان روز تقسیم می‌شود."; }
 .dashboard-stock-kpis > div:nth-child(2)::after { content: "سود/زیان محقق‌شده: سود فروش سهام، به‌علاوهٔ همهٔ مجامع پرداخت‌شده."; }
-.dashboard-stock-kpis > div:nth-child(3)::after { content: "نسبت سود کل بورس به مجموع همهٔ خریدهای سهام؛ بازده سالانه نیست."; }
+.dashboard-stock-kpis > div:nth-child(3)::after { content: "نسبت سود کل بورس به بیشترین بهای سهام هم‌زمان موجود در پایان روز؛ بازده سالانه نیست."; }
 .metric-card.featured { color: white; background: linear-gradient(130deg, #0c7769, #115e55); border: 0; }
 .metric-card.featured:after { content: ""; position: absolute; width: 150px; height: 150px; top: -75px; left: -30px; border: 1px solid rgba(255,255,255,.13); border-radius: 50%; box-shadow: 0 0 0 28px rgba(255,255,255,.035), 0 0 0 55px rgba(255,255,255,.025); }
 .metric-head { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 12px; }

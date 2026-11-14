@@ -102,9 +102,10 @@ ${
   stockLines.length > 0
     ? `[وضعیت سبد سهام بورس]
 - ارزش روز سهام بورس: ${money(bourseSummary?.currentValue || 0)}
-- نسبت سود محقق‌شده (فروش‌ها + مجامع پرداخت‌شده) به همهٔ خریدهای سهام: ${bourseSummary?.purchases ? percent(bourseSummary.realizedReturnPercent) : "—"}؛ سود محقق‌شده ${money(bourseSummary?.realizedProfit || 0)}
+- بیشترین پول درگیر بورس (اوج مجموع بهای سهام موجود در پایان یک روز): ${money(bourseSummary?.peakOpenCost || 0)}${bourseSummary?.peakOpenCostDate ? `، پایان ${toPersianDate(bourseSummary.peakOpenCostDate)}` : ""}؛ چون ساعت واقعی سفارش‌ها ثبت نشده اوج میان‌روز را حدس نمی‌زنیم؛ این عدد آوردهٔ خالص نقدی یا ارزش بازار نیست
+- نسبت سود محقق‌شده (فروش‌ها + مجامع پرداخت‌شده) به بیشترین پول درگیر بورس: ${bourseSummary?.peakOpenCost ? percent(bourseSummary.realizedReturnPercent) : "—"}؛ سود محقق‌شده ${money(bourseSummary?.realizedProfit || 0)}
 - نسبت سود قیمتی سهام موجود به بهای خرید همین سهام: ${bourseSummary?.currentCost ? percent(bourseSummary.currentProfitPercent) : "—"}؛ سود فعلی ${money(bourseSummary?.currentProfit || 0)}
-- نسبت سود کل (محقق‌شده + سود فعلی + مجامع در انتظار) به همهٔ خریدهای سهام: ${bourseSummary?.purchases ? percent(bourseSummary.toDateReturnPercent) : "—"}؛ سود کل ${money(bourseSummary?.toDateProfit || 0)}؛ بازده سالانه نیست
+- نسبت سود کل (محقق‌شده + سود فعلی + مجامع در انتظار) به بیشترین پول درگیر بورس: ${bourseSummary?.peakOpenCost ? percent(bourseSummary.toDateReturnPercent) : "—"}؛ سود کل ${money(bourseSummary?.toDateProfit || 0)}؛ همان درصد کارت بورس در دارایی‌ها و نه بازده سالانه
 - سود نقدی مجامع پرداخت‌شده (DPS): ${money(bourseSummary?.paidDividends || 0)}
 - مانده سپرده نزد کارگزاری (حامی): ${money(bourseSummary?.hamiBalance || 0)}
 

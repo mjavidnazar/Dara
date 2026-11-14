@@ -396,7 +396,7 @@ export function DashboardView({
                 description="خلاصهٔ سهام بورس؛ سه نسبت سود با مخرج‌های جداگانه در میزکار بورس نمایش داده می‌شوند."
                 details={[
                   "محاسبات بر اساس فایل‌های خروجی اکسل کارگزاری یا معاملات دستی انجام می‌شود.",
-                  "درصد سود جاری سهام موجود بر بهای خرید همان سهام تقسیم می‌شود؛ نسبت سود محقق‌شده و نسبت سود کل هر دو بر مجموع همهٔ خریدهای سهام تقسیم می‌شوند.",
+                  "درصد سود جاری بر بهای سهام موجود تقسیم می‌شود؛ نسبت سود محقق‌شده و سود کل هر دو بر بیشترین بهای خریدِ سهام هم‌زمان موجود در پایان یک روز تقسیم می‌شوند، نه جمع همهٔ خریدها.",
                   "سود فروش هر معامله برابر مبلغ خالص فروش منهای بهای میانگین سهم‌های فروخته‌شده است."
                 ]}
               />
@@ -427,7 +427,7 @@ export function DashboardView({
               details={[
                 "کارت‌ها بر اساس بیشترین ارزش روز ریالی مرتب شده‌اند.",
                 "رنگ نوار هر کارت نشان‌دهنده دسته‌بندی اختصاصی آن است.",
-                "درصد سود = (سود کل دارایی ÷ بهای خرید کل) × ۱۰۰"
+                "درصد سود سایر دارایی‌های غیرنقدی = سود کل ÷ مجموع خریدها؛ درصد کارت بورس = سود کل بورس ÷ بیشترین بهای خریدِ سهام هم‌زمان موجود در پایان یک روز."
               ]}
             />
           </div>
@@ -730,6 +730,8 @@ export function StocksDashboardView({
     currentProfitPercent,
     purchases: totalPurchases,
     sales: totalSales,
+    peakOpenCost,
+    peakOpenCostDate,
     realizedProfit: totalRealizedProfit,
     realizedReturnPercent,
     unrealizedProfit: totalUnrealizedProfit,
@@ -1021,29 +1023,30 @@ export function StocksDashboardView({
 
       <div className="stock-returns-heading">
         <h3>سه نسبت سود بورس</h3>
-        <p>درصدهای زیر نسبت به بهای خریدهای ثبت‌شده‌اند؛ بازده سالانه یا بازده سرمایهٔ اولیه نیستند.</p>
+        <p>مخرج نسبت‌های ۱ و ۳ اوج بهای سهام هم‌زمان موجود در پایان روز است (ساعت واقعی سفارش‌ها ثبت نشده)؛ مخرج نسبت ۲ بهای سهام فعلی است. این‌ها بازده سالانه نیستند.</p>
       </div>
       <section className="stock-kpi-grid stock-returns-grid" aria-label="سه نسبت سود بورس">
         <article className="hero-card stock-return-card" data-stock-return="realized">
           <div className="card-label-with-info">
-            <span className="card-label">۱. سود محقق‌شده / همهٔ خریدها</span>
+            <span className="card-label">۱. سود محقق‌شده / بیشترین پول درگیر بورس</span>
             <InfoButton
-              title="نسبت سود محقق‌شده به همهٔ خریدهای سهام"
-              formula="(سود/زیان فروش سهام + سود مجامع پرداخت‌شده) ÷ مجموع مبلغ همهٔ خریدهای سهام × ۱۰۰"
-              description="سود محقق‌شده نسبت به تمام خریدهای ثبت‌شده، حتی خریدِ سهامی که هنوز فروخته نشده است."
+              title="نسبت سود محقق‌شده به بیشترین پول درگیر بورس"
+              formula="(سود/زیان فروش سهام + مجامع پرداخت‌شده) ÷ بیشترین بهای خریدِ سهام هم‌زمان موجود در پایان یک روز × ۱۰۰"
+              description="مخرج، بیشترین بهای تمام‌شدهٔ سهامی است که در پایان یک روز با هم در سبد بوده‌اند؛ نه مجموع خریدهای تکرارشده یا پول نقد حامی."
               details={[
                 `سود/زیان فروش‌ها (فروش خالص منهای بهای میانگین سهام فروخته‌شده): ${signedMoney(totalRealizedTrades)}`,
                 `مجامع پرداخت‌شده: ${money(paidDividends)}`,
-                `کل خریدهای سهام: ${money(totalPurchases)}؛ نه فقط بهای سهام فروخته‌شده.`,
-                "سود فعلی سهام موجود و مجامع در انتظار در این نسبت نیستند."
+                `بیشترین پول درگیر بورس: ${money(peakOpenCost)}${peakOpenCostDate ? ` در پایان ${toPersianDate(peakOpenCostDate)}` : ""}.`,
+                `مجموع خریدهای تاریخی ${money(totalPurchases)} است، اما مخرج این نسبت نیست.`,
+                "با فروش، بهای میانگین سهم فروخته‌شده از پول درگیر کم می‌شود؛ سود جاری و مجامع در انتظار در صورتِ این نسبت نیستند."
               ]}
             />
           </div>
-          <h2 className={totalPurchases > 0 ? (totalRealizedProfit >= 0 ? "positive-text" : "negative-text") : undefined}>
-            {totalPurchases > 0 ? percent(realizedReturnPercent) : "—"}
+          <h2 className={peakOpenCost > 0 ? (totalRealizedProfit >= 0 ? "positive-text" : "negative-text") : undefined}>
+            {peakOpenCost > 0 ? percent(realizedReturnPercent) : "—"}
           </h2>
           <p className="card-sub">سود/زیان محقق‌شده: <b>{signedMoney(totalRealizedProfit)}</b></p>
-          <p className="card-sub">مخرج: همهٔ خریدهای سهام، {money(totalPurchases)}</p>
+          <p className="card-sub">مخرج: بیشترین پول درگیر بورس، {money(peakOpenCost)}{peakOpenCostDate ? ` (پایان ${toPersianDate(peakOpenCostDate)})` : ""}</p>
         </article>
 
         <article className="hero-card stock-return-card" data-stock-return="current">
@@ -1069,24 +1072,25 @@ export function StocksDashboardView({
 
         <article className="hero-card stock-return-card highlight-kpi" data-stock-return="total">
           <div className="card-label-with-info">
-            <span className="card-label">۳. سود کل / همهٔ خریدها</span>
+            <span className="card-label">۳. سود کل / بیشترین پول درگیر بورس</span>
             <InfoButton
-              title="نسبت سود محقق‌شده و محقق‌نشده به همهٔ خریدها"
-              formula="(سود/زیان فروش‌ها + مجامع پرداخت‌شده + سود/زیان فعلی سهام موجود + مجامع در انتظار) ÷ مجموع همهٔ خریدهای سهام × ۱۰۰"
-              description="جمع سود محقق‌شده و محقق‌نشده نسبت به کل خریدهای تاریخی سهام."
+              title="نسبت سود کل به بیشترین پول درگیر بورس"
+              formula="(سود/زیان فروش‌ها + مجامع پرداخت‌شده + سود/زیان فعلی سهام موجود + مجامع در انتظار) ÷ بیشترین بهای خریدِ سهام هم‌زمان موجود در پایان یک روز × ۱۰۰"
+              description="جمع سود محقق‌شده و محقق‌نشده نسبت به بیشترین بهای تمام‌شدهٔ سهامی که در یک روز هم‌زمان در سبد داشته‌اید."
               details={[
                 `سود محقق‌شده: ${signedMoney(totalRealizedProfit)}`,
                 `سود محقق‌نشده (تغییر قیمت سهام موجود + مجامع در انتظار): ${signedMoney(totalUnrealizedProfit)}`,
-                `مجموع خریدهای ثبت‌شده: ${money(totalPurchases)} · مجموع فروش‌ها: ${money(totalSales)}`,
-                "خرید دوباره با پول فروش، مخرج را افزایش می‌دهد؛ این نسبت بازده سالانه یا بازده سرمایهٔ اولیه نیست."
+                `بیشترین پول درگیر بورس: ${money(peakOpenCost)}${peakOpenCostDate ? ` در پایان ${toPersianDate(peakOpenCostDate)}` : ""}.`,
+                `مجموع خریدهای تاریخی: ${money(totalPurchases)} · مجموع فروش‌ها: ${money(totalSales)}`,
+                "فروش‌ها بهای میانگین سهام خارج‌شده را آزاد می‌کنند؛ خرید مجدد تنها وقتی مخرج را بالا می‌برد که جمع بهای سهامِ موجود در پایان روز از اوج قبلی بیشتر شود. این نسبت بازده سالانه یا آوردهٔ نقدی خالص نیست."
               ]}
             />
           </div>
-          <h2 className={totalPurchases > 0 ? (toDateProfit >= 0 ? "positive-text" : "negative-text") : undefined}>
-            {totalPurchases > 0 ? percent(toDateReturnPercent) : "—"}
+          <h2 className={peakOpenCost > 0 ? (toDateProfit >= 0 ? "positive-text" : "negative-text") : undefined}>
+            {peakOpenCost > 0 ? percent(toDateReturnPercent) : "—"}
           </h2>
           <p className="card-sub">سود/زیان کل (محقق‌شده + محقق‌نشده): <b>{signedMoney(toDateProfit)}</b></p>
-          <p className="card-sub">مخرج: همهٔ خریدهای سهام، {money(totalPurchases)}</p>
+          <p className="card-sub">مخرج: بیشترین پول درگیر بورس، {money(peakOpenCost)}{peakOpenCostDate ? ` (پایان ${toPersianDate(peakOpenCostDate)})` : ""}</p>
         </article>
       </section>
 
@@ -1956,6 +1960,7 @@ export function StocksDashboardView({
 
 export function AssetsView({
   metrics,
+  stockSummary,
   onAdd,
   onEdit,
   onQuickTx,
@@ -1968,6 +1973,7 @@ export function AssetsView({
   onStockImport,
 }: {
   metrics: AssetMetric[];
+  stockSummary: BourseSummary;
   onAdd: () => void;
   onEdit?: (asset: Asset) => void;
   onQuickTx?: (asset: Asset) => void;
@@ -2083,6 +2089,8 @@ export function AssetsView({
       <div className="assets-grid-full">
         {filtered.map((item) => {
           const mode = assetMode(item.asset);
+          const isBourse = item.asset.name === "بورس";
+          const displayedPercent = isBourse ? stockSummary.toDateReturnPercent : item.profitPercent;
           return (
             <div className="asset-card" key={item.asset.id}>
               <div className="asset-card-head">
@@ -2099,8 +2107,8 @@ export function AssetsView({
                     formula={
                       mode === "cash"
                         ? "مانده ریالی = مجموع واریزها + سودهای ماهانه + حاصل فروش سهام - خریدهای سهام - برداشت‌ها | سود کل = مجموع سودهای واریزی ماهانه"
-                        : mode === "stock"
-                        ? "سود کل بورس = سود/زیان فروش سهام + سود قیمتی سهام موجود + مجامع پرداخت‌شده و در انتظار | درصد این کارت = سود کل ÷ مجموع مبالغ سفارش‌های خرید سهام × ۱۰۰؛ بازده سالانه نیست"
+                        : isBourse
+                        ? "سود کل بورس = سود/زیان فروش سهام + سود قیمتی سهام موجود + مجامع پرداخت‌شده و در انتظار | درصد این کارت = سود کل ÷ بیشترین بهای خریدِ سهام هم‌زمان موجود در پایان یک روز × ۱۰۰؛ بازده سالانه نیست"
                         : "ارزش روز = موجودی × قیمت روز | سود کل = سود/زیان فروش‌های گذشته + ارزش روز موجودی − بهای تمام‌شدهٔ موجودی | درصد سود = (سود کل ÷ مجموع مبالغ همهٔ خریدهای ثبت‌شده) × ۱۰۰؛ این نسبت بازده سالانه نیست"
                     }
                     description={
@@ -2117,10 +2125,12 @@ export function AssetsView({
                               ? "با هر خرید سهام وجه از حامی کسر و با هر فروش سهام، وجه به حامی واریز می‌شود."
                               : "سرمایه‌گذاری نقدی با امکان واریز و برداشت مستقیم."
                           ]
-                        : mode === "stock"
+                        : isBourse
                         ? [
                             `ارزش سهام فعال: ${money(item.marketValue)}.`,
-                            "درصد این کارت همان نسبت سوم میزکار بورس است: سود کل ÷ همهٔ خریدهای سهام؛ نسبت‌های سود محقق‌شده و سود سهام موجود را جداگانه در میزکار بورس ببینید."
+                            `بیشترین پول درگیر بورس: ${money(stockSummary.peakOpenCost)}${stockSummary.peakOpenCostDate ? ` در پایان ${toPersianDate(stockSummary.peakOpenCostDate)}` : ""}.`,
+                            `درصد این کارت همان نسبت سوم میزکار بورس است: سود کل ÷ بیشترین پول درگیر، نه مجموع خریدهای تاریخی (${money(stockSummary.purchases)}).`,
+                            "پول نقد حامی و تغییر قیمت بازار در مخرج نیستند؛ این نسبت بازده سالانه یا آوردهٔ خالص نقدی نیست."
                           ]
                         : [
                             `موجودی فعلی: ${nf.format(item.quantity)} ${item.asset.unit || "واحد"} حاصل تفریق تمام فروش‌ها از خریدهاست.`,
@@ -2134,12 +2144,14 @@ export function AssetsView({
                 </div>
                 {(mode !== "cash" || item.totalProfit !== 0) && (
                   <span
-                    className={`pill-badge ${item.profitPercent >= 0 ? "positive" : "negative"}`}
-                    title={mode === "cash" ? undefined : mode === "stock"
-                      ? "سود کل بورس نسبت به جمع مبالغ خریدِ سفارش‌های سهام؛ نه بازده سالانه"
+                    className={`pill-badge ${isBourse && stockSummary.peakOpenCost <= 0 ? "neutral" : displayedPercent >= 0 ? "positive" : "negative"}`}
+                    title={mode === "cash" ? undefined : isBourse
+                      ? stockSummary.peakOpenCost > 0
+                        ? `سود کل بورس نسبت به بیشترین پول درگیر بورس (${money(stockSummary.peakOpenCost)}${stockSummary.peakOpenCostDate ? `؛ پایان ${toPersianDate(stockSummary.peakOpenCostDate)}` : ""})؛ همان نسبت سوم میزکار، نه بازده سالانه`
+                        : "بدون خرید معتبر سهام، نسبت سود کل بورس قابل محاسبه نیست."
                       : `سود کل نسبت به مجموع بهای همهٔ خریدها (${money(item.totalGrossBuys)})؛ نه بازده سالانه`}
                   >
-                    {percent(item.profitPercent)}
+                    {isBourse && stockSummary.peakOpenCost <= 0 ? "—" : percent(displayedPercent)}
                   </span>
                 )}
               </div>
@@ -4918,7 +4930,7 @@ export function ReportsView({
             <h3 style={{ margin: 0 }}>رتبه‌بندی عملکرد تمام دارایی‌ها</h3>
             <InfoButton
               title="جدول رتبه‌بندی عملکرد تمام دارایی‌ها"
-              formula="سهم از پورتفو = (ارزش مثبت دارایی ÷ مجموع دارایی‌های مثبت) × ۱۰۰؛ ماندهٔ منفی از خالص ارزش کسر می‌شود | درصد سود دارایی غیرنقدی = (سود کل ÷ مجموع بهای همهٔ خریدهای ثبت‌شده) × ۱۰۰؛ این نسبت بازده سالانه یا بازده پول اولیه نیست. حساب نقدی مبنای جداگانه دارد."
+              formula="سهم از پورتفو = (ارزش مثبت دارایی ÷ مجموع دارایی‌های مثبت) × ۱۰۰؛ ماندهٔ منفی از خالص ارزش کسر می‌شود | درصد سود دارایی غیرنقدی به‌جز بورس = سود کل ÷ مجموع بهای خریدهای ثبت‌شده؛ درصد بورس = سود کل بورس ÷ بیشترین بهای سهام هم‌زمان موجود در پایان روز. حساب نقدی مبنای جداگانه دارد؛ این نسبت‌ها بازده سالانه یا بازده پول اولیه نیستند."
               description="مقایسه عملکرد و بازدهی تمام دارایی‌ها به تفکیک بهای تمام‌شده، ارزش روز، سود تحقق‌یافته و جاری."
               details={[
                 "بهای تمام‌شده (Cost Basis): کل مبلغ پرداخت‌شده برای خرید سهم یا دارایی موجود.",

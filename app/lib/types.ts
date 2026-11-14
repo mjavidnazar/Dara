@@ -221,16 +221,18 @@ export interface BourseSummary {
   currentCost: number;
   currentProfit: number;
   currentProfitPercent: number;
-  purchases: number;
+  purchases: number; // Historical total, for reference; not the denominator of ratios 1 and 3.
   sales: number;
+  peakOpenCost: number; // Maximum combined cost basis of shares held at a day's close.
+  peakOpenCostDate: string | null; // First day the maximum was reached.
   realizedProfit: number;
   realizedCost: number; // Cost of sold shares (informational; not the realized ratio's denominator).
-  realizedReturnPercent: number; // Realized profit / all recorded stock purchases.
+  realizedReturnPercent: number; // Realized profit / peakOpenCost.
   unrealizedProfit: number;
   paidDividends: number;
   pendingDividends: number;
   totalDividends: number;
   toDateProfit: number;
-  toDateReturnPercent: number;
+  toDateReturnPercent: number; // Total profit / peakOpenCost.
   hamiBalance: number;
 }

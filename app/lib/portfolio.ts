@@ -511,6 +511,55 @@ export function stockMetrics(
   });
 }
 
+/**
+ * Maximum purchase cost of shares held together at the end of a recorded day.
+ * Sales release the weighted-average cost of the shares sold, not their proceeds;
+ * neither cash held in the broker account nor market-price changes are included.
+ * Within a day, follow the same date/time and stable source order as stockMetrics,
+ * but never claim an intraday peak when real trade times may be unknown.
+ */
+export function peakOpenStockCost(
+  orders: StockOrder[] = [], asOf = todayIso()
+): { amount: number; date: string | null } {
+  const sorted = (orders || [])
+    .filter((order) => validIsoDate(order.date) && order.date <= asOf && hasValidStockOrder(order) &&
+      normalizeSymbol(order.symbol) !== "کیان" && !order.symbol?.includes("کیان"))
+    .map((order, index) => ({ order, index }))
+    .sort((a, b) => a.order.date.localeCompare(b.order.date) ||
+      (a.order.time ?? "").localeCompare(b.order.time ?? "") || a.index - b.index);
+
+  const positions = new Map<string, { quantity: number; cost: number }>();
+  let peak = 0;
+  let peakDate: string | null = null;
+  for (let i = 0; i < sorted.length; i++) {
+    const order = sorted[i].order;
+    const symbol = normalizeSymbol(order.symbol);
+    const position = positions.get(symbol) ?? { quantity: 0, cost: 0 };
+    const quantity = safeNumber(order.quantity);
+    const total = safeNumber(order.totalPrice);
+    if (order.type === "buy") {
+      position.quantity += quantity;
+      position.cost += total;
+    } else {
+      const average = position.quantity > 0 ? position.cost / position.quantity : 0;
+      position.cost -= average * quantity;
+      position.quantity -= quantity;
+    }
+    positions.set(symbol, position);
+
+    if (i === sorted.length - 1 || sorted[i + 1].order.date !== order.date) {
+      const closingCost = Array.from(positions.values()).reduce(
+        (sum, item) => sum + (item.quantity > 0 ? Math.max(0, item.cost) : 0), 0
+      );
+      if (closingCost > peak) {
+        peak = closingCost;
+        peakDate = order.date; // Keep the first day if a later day ties the peak.
+      }
+    }
+  }
+  return { amount: peak, date: peakDate };
+}
+
 export function calculateBourseSummary(
   stockData: StockSymbolMetric[] = [],
   orders: StockOrder[] = [],
@@ -524,12 +573,17 @@ export function calculateBourseSummary(
   const currentProfit = currentValue - currentCost;
   const currentProfitPercent = currentCost > 0 ? (currentProfit / currentCost) * 100 : 0;
 
-  const purchases = (orders || [])
-    .filter((item) => item.type === "buy" && hasValidStockOrder(item) && validIsoDate(item.date) && item.date <= todayIso())
+  const validOrders = (orders || []).filter((item) =>
+    hasValidStockOrder(item) && validIsoDate(item.date) && item.date <= todayIso() &&
+    normalizeSymbol(item.symbol) !== "کیان" && !item.symbol?.includes("کیان")
+  );
+  const purchases = validOrders
+    .filter((item) => item.type === "buy")
     .reduce((sum, item) => sum + safeNumber(item.totalPrice), 0);
-  const sales = (orders || [])
-    .filter((item) => item.type === "sell" && hasValidStockOrder(item) && validIsoDate(item.date) && item.date <= todayIso())
+  const sales = validOrders
+    .filter((item) => item.type === "sell")
     .reduce((sum, item) => sum + safeNumber(item.totalPrice), 0);
+  const { amount: peakOpenCost, date: peakOpenCostDate } = peakOpenStockCost(validOrders);
 
   const rawRealized = stockData.reduce((sum, item) => sum + item.realized, 0);
   const paidDividends = stockData.reduce((sum, item) => sum + item.paidDividend, 0);
@@ -539,16 +593,17 @@ export function calculateBourseSummary(
   // Realized profit: closed trades capital gain + actual paid/received cash dividends
   const realizedProfit = rawRealized + paidDividends;
   const realizedCost = Math.max(0, sales - rawRealized);
-  // Paid dividends may belong to shares still held. The realized-profit ratio
-  // uses all stock purchases, not only the cost basis of shares already sold.
-  const realizedReturnPercent = purchases > 0 ? (realizedProfit / purchases) * 100 : 0;
+  // Paid dividends may belong to shares still held. Both cumulative-profit
+  // ratios use the portfolio-wide peak open cost, not summed per-symbol peaks,
+  // lifetime buys or the cost of shares that happened to be sold.
+  const realizedReturnPercent = peakOpenCost > 0 ? (realizedProfit / peakOpenCost) * 100 : 0;
 
   // Unrealized profit: current active stock gain + approved pending dividends
   const unrealizedProfit = currentProfit + pendingDividends;
 
   // Total profit = Realized profit + Unrealized profit
   const toDateProfit = realizedProfit + unrealizedProfit;
-  const toDateReturnPercent = purchases > 0 ? (toDateProfit / purchases) * 100 : 0;
+  const toDateReturnPercent = peakOpenCost > 0 ? (toDateProfit / peakOpenCost) * 100 : 0;
 
   const hami = assets.find((asset) => asset.name.includes("حامی"));
   const hamiBalance = hami ? metricsAt([hami], transactions, prices)[0]?.marketValue ?? 0 : 0;
@@ -560,6 +615,8 @@ export function calculateBourseSummary(
     currentProfitPercent,
     purchases,
     sales,
+    peakOpenCost,
+    peakOpenCostDate,
     realizedProfit,
     realizedCost,
     realizedReturnPercent,
