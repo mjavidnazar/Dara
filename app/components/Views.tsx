@@ -51,6 +51,7 @@ import type { TransactionReview } from "../lib/transactionReviews";
 import { compareRowsWithinDay, ledgerRowKey } from "../lib/transactionDayOrder";
 import type { DayRowPosition } from "../lib/transactionDayOrder";
 import { JalaliDatePicker } from "./JalaliDatePicker";
+import { StockPriceExcelImport } from "./StockPriceExcelImport";
 import {
   StockDividendModal,
   StockSymbolTradesModal,
@@ -326,7 +327,7 @@ export function DashboardView({
               description="تاریخی که آخرین نرخ بازار در پایگاه داده پورتفوی شما ذخیره شده است."
               details={[
                 "محاسبه سود یا زیان جاری وابستگی مستقیم به تازگی قیمت‌های بازار دارد.",
-                "می‌توانید با دکمه به‌روزرسانی قیمت‌ها در نمای دارایی‌ها یا دکمه دریافت خودکار در میزکار بورس، نرخ‌ها را تازه کنید."
+                "برای سهام، اکسل خروجی پرتفوی را در میزکار بورس بخوانید یا قیمت‌ها را دستی ثبت کنید؛ نرخ سایر دارایی‌ها در نمای دارایی‌ها به‌روز می‌شود."
               ]}
             />
           </div>
@@ -667,7 +668,6 @@ export function StocksDashboardView({
   onSaveHamiCashTransfer,
   onDividend,
   onEditOrder,
-  onAutoPrices,
   onToggleDividend,
   onDeleteDividend,
 }: {
@@ -686,7 +686,6 @@ export function StocksDashboardView({
   ) => void;
   onDividend: (dividend: StockDividend) => void;
   onEditOrder: (order: StockOrder) => void;
-  onAutoPrices: () => Promise<void>;
   onToggleDividend: (dividend: StockDividend, targetStatus?: "pending" | "paid") => void;
   onDeleteDividend?: (id: string) => void;
 }) {
@@ -696,7 +695,6 @@ export function StocksDashboardView({
   const [dividendFilter, setDividendFilter] = useState<"all" | "paid" | "pending">("all");
   const [priceDate, setPriceDate] = useState(todayIso());
   const [pricesState, setPricesState] = useState<Record<string, string>>({});
-  const [isUpdatingPrices, setIsUpdatingPrices] = useState(false);
 
   const [hamiOpMode, setHamiOpMode] = useState<"interest" | "deposit" | "withdraw">("interest");
   const [hamiAmount, setHamiAmount] = useState("");
@@ -918,15 +916,6 @@ export function StocksDashboardView({
     }
   };
 
-  const handleAutoPricesClick = async () => {
-    setIsUpdatingPrices(true);
-    try {
-      await onAutoPrices();
-    } finally {
-      setIsUpdatingPrices(false);
-    }
-  };
-
   const handleHamiSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const amount = safeNumber(hamiAmount);
@@ -1106,7 +1095,7 @@ export function StocksDashboardView({
                 description="فهرست کامل نمادهای موجود در پورتفو به همراه جزییات خرید، سود جاری و بازدهی."
                 details={[
                   "میانگین خرید به صورت میانگین موزون با هر خرید جدید بازنگری می‌شود.",
-                  "ارزش روز با ثبت قیمت‌های جدید یا دریافت خودکار از بورس به‌روز می‌شود.",
+                  "ارزش روز با ثبت دستی قیمت یا خواندن ستون «آخرین قیمت» از اکسل پرتفوی به‌روز می‌شود.",
                   "دکمه معاملات: مشاهده تاریخچه کلیه خریدها و فروش‌های ثبت‌شده برای این نماد.",
                   "دکمه مجمع: ثبت سود تقسیمی تصویب‌شده مجمع عمومی سالیانه شرکت."
                 ]}
@@ -1766,38 +1755,35 @@ export function StocksDashboardView({
       {/* Stock Operations: Price Updates & Hami Interest Deposit */}
       <section className="stock-ops-grid">
         <div className="panel-card">
-          <div className="panel-head">
+          <div className="panel-head stock-price-panel-head">
             <div>
               <div className="title-with-info">
                 <h3 style={{ margin: 0 }}>به‌روزرسانی قیمت‌های روز بازار سهام</h3>
                 <InfoButton
                   title="به‌روزرسانی قیمت‌های روز بازار سهام"
-                  formula="نرخ جدید در پایگاه داده ذخیره شده و ارزش روز و سود جاری نمادها بلافاصله بازآرایی می‌گردد"
-                  description="امکان ثبت قیمت پایانی نمادها به صورت خودکار از بورس یا ورود دستی نرخ‌ها در تاریخ مشخص."
+                  formula="قیمت هر سهم به تومان = «آخرین قیمت» اکسل به ریال ÷ ۱۰؛ قیمت جدید برای تاریخ انتخابی در تاریخچه ثبت می‌شود"
+                  description="قیمت نمادهای دارای موجودی را از اکسل خروجی پرتفوی بخوانید یا به‌صورت دستی وارد کنید. معاملات و مانده‌ها تغییر نمی‌کنند."
                   details={[
-                    "دریافت خودکار از بورس: استعلام آخرین قیمت پایانی نمادها از وب‌سرویس مدیریت فناوری بورس (TSETMC).",
-                    "ورود دستی: مناسب روزهایی که بازار بسته است یا تمایل دارید قیمت خاصی را برای ارزیابی ثبت کنید."
+                    "فقط ستون «آخرین قیمت» خوانده می‌شود، نه «قیمت پایانی» یا «درصد آخرین قیمت». فایل در همین مرورگر بررسی و پیش از ثبت نمایش داده می‌شود.",
+                    "تاریخ آخرین تراکنش در اکسل، تاریخ قیمت بازار نیست؛ تاریخ اعمال قیمت‌ها را خودتان در همین پنل انتخاب کنید.",
+                    "قیمت‌های قبلی در تاریخچه باقی می‌مانند و ورود دستی نیز همچنان در دسترس است."
                   ]}
                 />
               </div>
-              <p>قیمت نمادهای فعال را دستی ثبت کنید یا از بورس دریافت کنید. نرخ جدیدِ هر روز مبنای همان روز است و نرخ‌های قبلی در تاریخچه می‌مانند.</p>
+              <p>اکسل پرتفوی را انتخاب و قیمت‌های قابل ثبت را بررسی کنید، یا قیمت نمادهای فعال را دستی وارد کنید. نرخ‌های قبلی در تاریخچه می‌مانند.</p>
             </div>
-            <button
-              type="button"
-              className="button secondary"
-              disabled={isUpdatingPrices}
-              onClick={handleAutoPricesClick}
-            >
-              <RefreshCw size={16} className={isUpdatingPrices ? "spin" : ""} />
-              {isUpdatingPrices ? "در حال دریافت…" : "دریافت خودکار از بورس"}
-            </button>
           </div>
-          <form className="modal-form" onSubmit={handlePriceUpdateSubmit}>
+          <div className="stock-price-controls">
             <label>
-              <span>تاریخ اعمال قیمت‌ها</span>
-              <JalaliDatePicker value={priceDate} onChange={setPriceDate} />
+              <span>تاریخ اعمال قیمت‌ها (اکسل و دستی)</span>
+              <JalaliDatePicker value={priceDate} onChange={setPriceDate} maxDate={todayIso()} />
             </label>
-            {!validIsoDate(priceDate) || priceDate > todayIso() ? <small className="negative-text">تاریخ نرخ پایانی باید معتبر باشد و از امروز جلوتر نباشد.</small> : null}
+            <small>تاریخ آخرین تراکنش در فایل، تاریخ قیمت بازار نیست؛ قیمت‌ها با تاریخ انتخابی اینجا ثبت می‌شوند.</small>
+            {!validIsoDate(priceDate) || priceDate > todayIso() ? <small className="negative-text">تاریخ قیمت باید معتبر باشد و از امروز جلوتر نباشد.</small> : null}
+          </div>
+          <StockPriceExcelImport symbols={currentStocks.map((stock) => stock.symbol)} date={priceDate} onSavePrices={onSavePrices} />
+          <form className="modal-form stock-price-manual" onSubmit={handlePriceUpdateSubmit}>
+            <h4>ثبت دستی قیمت‌ها (تومان)</h4>
             <div className="bulk-price-list">
               {currentStocks.map((stock) => (
                 <label className="bulk-price-row" key={stock.symbol}>
@@ -1807,7 +1793,7 @@ export function StocksDashboardView({
                   </span>
                   <input
                     inputMode="numeric"
-                    placeholder="قیمت جدید"
+                    placeholder="قیمت جدید (تومان)"
                     value={pricesState[stock.symbol] ?? ""}
                     onChange={(e) =>
                       setPricesState({ ...pricesState, [stock.symbol]: e.target.value })
@@ -1818,7 +1804,7 @@ export function StocksDashboardView({
             </div>
             <div className="modal-actions">
               <button type="submit" className="button primary" disabled={!validIsoDate(priceDate) || priceDate > todayIso() || !Object.values(pricesState).some((value) => safeNumber(value) > 0)}>
-                ثبت قیمت‌های جدید سهام
+                ثبت قیمت‌های دستی سهام
               </button>
               <button type="button" className="button secondary" onClick={onManagePrices}>
                 تاریخچه و اصلاح قیمت‌های سهام

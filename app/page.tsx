@@ -458,61 +458,6 @@ export default function App() {
     }
   };
 
-  // Stock price auto fetcher
-  const fetchCurrentStockPrices = async () => {
-    try {
-      const res = await fetch("/api/brsapi/prices");
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => null);
-        throw new Error(
-          errJson?.error || "ارتباط با سرویس قیمت‌های بورس برقرار نشد."
-        );
-      }
-      const list = await res.json();
-      if (!Array.isArray(list)) {
-        throw new Error("قالب داده‌های دریافتی از سرور بورس نامعتبر است.");
-      }
-
-      const priceMap = new Map<string, number>();
-      list.forEach((item: any) => {
-        const symbol = normalizeSymbol(item.l18 || item.l30 || item.symbol);
-        const price =
-          cleanDigits(item.pc || item.pclosing || item.pl) / 10;
-        if (symbol && price > 0) priceMap.set(symbol, price);
-      });
-
-      const today = todayIso();
-      const currentSymbols = new Set(
-        stockData.filter((item) => item.quantity > 0).map((item) => item.symbol)
-      );
-
-      const updates: StockPrice[] = [];
-      for (const symbol of currentSymbols) {
-        const found = priceMap.get(symbol);
-        if (found) {
-          updates.push({
-            id: uid("sp-auto"),
-            symbol,
-            price: found,
-            date: today,
-          });
-        }
-      }
-
-      if (updates.length > 0) {
-        setData((prev) => appendStockPrices(prev, updates));
-        notify(`${updates.length} قیمت سهام از بورس به‌روزرسانی شد.`);
-      } else {
-        notify("قیمت جدیدی برای نمادهای شما دریافت نشد.", "error");
-      }
-    } catch (err: any) {
-      notify(
-        err?.message || "ارتباط با سرویس قیمت‌های بورس برقرار نشد.",
-        "error"
-      );
-    }
-  };
-
   const hasDuplicateTransactionId = (tx: Transaction) =>
     data.transactions.filter((item) => item.id === tx.id).length > 1;
 
@@ -849,7 +794,7 @@ export default function App() {
               onManagePrices={() => { setStockPriceFocusId(null); setStockPriceModal(true); }}
               onSavePrices={(updates: StockPrice[]) => {
                 setData((prev) => appendStockPrices(prev, updates));
-                notify("قیمت‌های سهام با موفقیت به‌روزرسانی شد.");
+                notify(`${nf.format(updates.length)} قیمت سهام با موفقیت ثبت شد.`);
               }}
               onSaveHamiInterest={(amount: number, date: string, note: string) => {
                 const hami = data.assets.find((a) => a.name.includes("حامی"));
@@ -924,7 +869,6 @@ export default function App() {
                 }));
                 notify("معاملهٔ بورس و ماندهٔ صندوق حامی هم‌گام شد.");
               }}
-              onAutoPrices={fetchCurrentStockPrices}
             />
           )}
 

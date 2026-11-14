@@ -34,7 +34,7 @@ function stockView(data: PortfolioData) {
   return renderToStaticMarkup(createElement(StocksDashboardView, {
     items, data, stockSummary,
     onSavePrices: () => {}, onManagePrices: () => {}, onSaveHamiInterest: () => {},
-    onDividend: () => {}, onEditOrder: () => {}, onAutoPrices: async () => {},
+    onDividend: () => {}, onEditOrder: () => {},
     onToggleDividend: () => {},
   }));
 }
